@@ -1,11 +1,16 @@
 --[[
-    DroneClient v5 — Реалистичный FPV квадрокоптер
-    - Физическая модель тяги: тяга направлена вдоль крыши дрона (CFrame.UpVector)
-    - Газ: 50% = парение (hover), 100% = мощный взлёт, 0% = свободное падение
-    - Аэродинамика: накат по инерции и естественное сопротивление воздуха
-    - Разворот 360° по рысканию, наклон до 45° по тангажу и крену
-    - Кнопка ручной детонации (💥 ПОДРЫВ) на экране и клавиша R / X
-    - Удобные сенсорные джойстики для телефона и поддержка ПК (WASD)
+    DroneClient v6
+    - ИСПРАВЛЕНО УПРАВЛЕНИЕ:
+      * Стик вверх / W = нос вниз, полёт ВПЕРЁД (больше никакой инверсии!)
+      * Стик вниз / S = нос вверх, тормоз / полёт НАЗАД
+      * Стик вправо / D = крен вправо, полёт ВПРАВО
+      * Стик влево / A = крен влево, полёт ВЛЕВО
+      * Левый стик влево/вправо / Q/E = поворот курса (рыскание 360°)
+      * Левый стик вверх / Space = ГАЗ ВВЕРХ (набор высоты)
+      * Левый стик вниз / Shift = ГАЗ ВНИЗ (снижение)
+      * Центр стика = стабильное зависание (hover)
+    - ИСПРАВЛЕН ВЗРЫВ: модель дрона мгновенно удаляется при подрыве или столкновении
+    - КНОПКА "💥 ПОДРЫВ" и клавиши R / X для ручной детонации
 ]]
 
 local Players           = game:GetService("Players")
@@ -35,24 +40,24 @@ local windSound   = nil
 
 -- Ориентация
 local currentYaw   = 0   -- курс (Y)
-local currentPitch = 0   -- тангаж (X)
-local currentRoll  = 0   -- крен (Z)
+local currentPitch = 0   -- тангаж: >0 = наклон вперед (нос вниз)
+local currentRoll  = 0   -- крен: >0 = наклон вправо
 
--- Ввод (-1 .. 1)
-local pitchIn    = 0
-local rollIn     = 0
-local yawIn      = 0
-local throttleIn = 0.5   -- 0.5 = парение, 1 = полный газ, 0 = выключен
+-- Ввод
+local pitchIn    = 0     -- +1 = вперед (W), -1 = назад (S)
+local rollIn     = 0     -- +1 = вправо (D), -1 = влево (A)
+local yawIn      = 0     -- +1 = поворот вправо (E), -1 = поворот влево (Q)
+local throttleIn = 0.5   -- 0.5 = зависание, 1.0 = макс газ, 0.0 = выкл
 
 local keysDown   = {}
 local isMobile   = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
-local collisionCooldown = false
+local collisionLock = false
 
 -- ────────────────────── ЗВУК ВЕТРА ─────────────────────────
 local function setupWindAudio()
     if not windSound then
         windSound = Instance.new("Sound")
-        windSound.Name = "WindSFX"
+        windSound.Name = "DroneWindSFX"
         windSound.SoundId = "rbxasset://sounds/action_falling.mp3"
         windSound.Looped = true
         windSound.Volume = 0
@@ -61,7 +66,7 @@ local function setupWindAudio()
 end
 setupWindAudio()
 
--- ────────────────────── HUD / FPV OSD ──────────────────────
+-- ────────────────────── HUD И OSD ──────────────────────────
 local hudGui, horizonBar, warningLabel, flashFrame
 
 local function createHUD()
@@ -74,7 +79,7 @@ local function createHUD()
     hudGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
     hudGui.Parent = player:WaitForChild("PlayerGui")
 
-    -- Вспышка при взрыве
+    -- Вспышка детонации
     flashFrame = Instance.new("Frame")
     flashFrame.Name = "Flash"
     flashFrame.Size = UDim2.new(1, 0, 1, 0)
@@ -93,9 +98,9 @@ local function createHUD()
     vig.ImageTransparency = 0.55
     vig.Parent = hudGui
 
-    -- Прицел (крестик)
+    -- Прицел
     local chV = Instance.new("Frame")
-    chV.Size = UDim2.new(0, 2, 0, 22)
+    chV.Size = UDim2.new(0, 2, 0, 24)
     chV.AnchorPoint = Vector2.new(0.5, 0.5)
     chV.Position = UDim2.new(0.5, 0, 0.5, 0)
     chV.BackgroundColor3 = Color3.fromRGB(0, 255, 120)
@@ -104,7 +109,7 @@ local function createHUD()
     chV.Parent = hudGui
 
     local chH = Instance.new("Frame")
-    chH.Size = UDim2.new(0, 22, 0, 2)
+    chH.Size = UDim2.new(0, 24, 0, 2)
     chH.AnchorPoint = Vector2.new(0.5, 0.5)
     chH.Position = UDim2.new(0.5, 0, 0.5, 0)
     chH.BackgroundColor3 = Color3.fromRGB(0, 255, 120)
@@ -112,10 +117,10 @@ local function createHUD()
     chH.BorderSizePixel = 0
     chH.Parent = hudGui
 
-    -- Линия горизонта
+    -- Авиагоризонт
     horizonBar = Instance.new("Frame")
     horizonBar.Name = "Horizon"
-    horizonBar.Size = UDim2.new(0, 90, 0, 2)
+    horizonBar.Size = UDim2.new(0, 100, 0, 2)
     horizonBar.AnchorPoint = Vector2.new(0.5, 0.5)
     horizonBar.Position = UDim2.new(0.5, 0, 0.5, 20)
     horizonBar.BackgroundColor3 = Color3.fromRGB(0, 255, 120)
@@ -123,7 +128,7 @@ local function createHUD()
     horizonBar.BorderSizePixel = 0
     horizonBar.Parent = hudGui
 
-    -- Панель OSD (слева сверху)
+    -- Панель телеметрии (слева вверху)
     local panel = Instance.new("Frame")
     panel.Name = "InfoPanel"
     panel.Size = UDim2.new(0, 155, 0, 105)
@@ -165,7 +170,7 @@ local function createHUD()
     topR.Text = "● REC  4S 15.6V"
     topR.Parent = hudGui
 
-    -- Предупреждение о границах
+    -- Предупреждение границы
     warningLabel = Instance.new("TextLabel")
     warningLabel.Name = "WarningBanner"
     warningLabel.Size = UDim2.new(0, 360, 0, 38)
@@ -176,15 +181,15 @@ local function createHUD()
     warningLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
     warningLabel.Font = Enum.Font.GothamBold
     warningLabel.TextSize = 15
-    warningLabel.Text = "⚠️ ВЫХОД ЗА ГРАНИЦЫ"
+    warningLabel.Text = "⚠️ СИГНАЛ ТЕРЯЕТСЯ — ВЫХОД ЗА КАРТУ"
     warningLabel.Visible = false
     warningLabel.Parent = hudGui
     Instance.new("UICorner", warningLabel).CornerRadius = UDim.new(0, 8)
 
-    -- ВЕРХНЯЯ ПАНЕЛЬ УПРАВЛЕНИЯ (Кнопка ПОДРЫВ и ВЫХОД)
+    -- ВЕРХНИЕ КНОПКИ (ПОДРЫВ И ВЫХОД)
     local topControls = Instance.new("Frame")
     topControls.Name = "TopControls"
-    topControls.Size = UDim2.new(0, 260, 0, 42)
+    topControls.Size = UDim2.new(0, 270, 0, 42)
     topControls.AnchorPoint = Vector2.new(0.5, 0)
     topControls.Position = UDim2.new(0.5, 0, 0, 12)
     topControls.BackgroundTransparency = 1
@@ -193,9 +198,9 @@ local function createHUD()
     -- 💥 КНОПКА РУЧНОЙ ДЕТОНАЦИИ
     local boomBtn = Instance.new("TextButton")
     boomBtn.Name = "BoomBtn"
-    boomBtn.Size = UDim2.new(0, 130, 0, 38)
+    boomBtn.Size = UDim2.new(0, 135, 0, 38)
     boomBtn.Position = UDim2.new(0, 0, 0, 0)
-    boomBtn.BackgroundColor3 = Color3.fromRGB(220, 35, 35)
+    boomBtn.BackgroundColor3 = Color3.fromRGB(225, 30, 30)
     boomBtn.BackgroundTransparency = 0.15
     boomBtn.BorderSizePixel = 0
     boomBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -210,15 +215,15 @@ local function createHUD()
         end
     end)
 
-    -- 🚪 КНОПКА ВЫХОДА
+    -- 🚪 ВЫХОД
     local exitBtn = Instance.new("TextButton")
     exitBtn.Name = "ExitBtn"
-    exitBtn.Size = UDim2.new(0, 110, 0, 38)
-    exitBtn.Position = UDim2.new(0, 140, 0, 0)
-    exitBtn.BackgroundColor3 = Color3.fromRGB(60, 65, 75)
+    exitBtn.Size = UDim2.new(0, 115, 0, 38)
+    exitBtn.Position = UDim2.new(0, 145, 0, 0)
+    exitBtn.BackgroundColor3 = Color3.fromRGB(55, 60, 70)
     exitBtn.BackgroundTransparency = 0.25
     exitBtn.BorderSizePixel = 0
-    exitBtn.TextColor3 = Color3.fromRGB(230, 230, 230)
+    exitBtn.TextColor3 = Color3.fromRGB(235, 235, 235)
     exitBtn.Font = Enum.Font.GothamBold
     exitBtn.TextSize = 13
     exitBtn.Text = "🚪 ВЫХОД"
@@ -230,18 +235,18 @@ local function createHUD()
         end
     end)
 
-    -- Подсказка для ПК
+    -- Подсказка управления для ПК
     if not isMobile then
         local hint = Instance.new("TextLabel")
-        hint.Size = UDim2.new(0, 520, 0, 34)
+        hint.Size = UDim2.new(0, 530, 0, 34)
         hint.AnchorPoint = Vector2.new(0.5, 1)
         hint.Position = UDim2.new(0.5, 0, 1, -12)
         hint.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
         hint.BackgroundTransparency = 0.55
-        hint.TextColor3 = Color3.fromRGB(215, 215, 215)
+        hint.TextColor3 = Color3.fromRGB(220, 220, 220)
         hint.Font = Enum.Font.Code
         hint.TextSize = 13
-        hint.Text = "W/S: Тангаж | A/D: Крен | Q/E: Рыскание | Space/Shift: Газ | R: ПОДРЫВ | F: Выход"
+        hint.Text = "W: Вперёд | S: Назад | A: Влево | D: Вправо | Q/E: Курс | Space/Shift: Газ | R: ПОДРЫВ"
         hint.Parent = hudGui
         Instance.new("UICorner", hint).CornerRadius = UDim.new(0, 6)
     end
@@ -271,7 +276,8 @@ local function updateHUD()
 
     if horizonBar then
         horizonBar.Rotation = math.deg(-currentRoll)
-        horizonBar.Position = UDim2.new(0.5, 0, 0.5, math.clamp(math.deg(currentPitch) * 1.2, -60, 60))
+        -- Когда нос опущен (currentPitch > 0, полёт вперёд), горизонт на экране поднимается вверх
+        horizonBar.Position = UDim2.new(0.5, 0, 0.5, -math.clamp(math.deg(currentPitch) * 1.2, -60, 60))
     end
 end
 
@@ -328,8 +334,8 @@ local function createMobileUI()
         return base, thumb
     end
 
-    local leftBase, lThumb  = createStick("LeftStick",  0, 0.04, "ГАЗ / РЫСКАНИЕ")
-    local rightBase, rThumb = createStick("RightStick", 1, 0.96, "ТАНГАЖ / КРЕН")
+    local leftBase, lThumb  = createStick("LeftStick",  0, 0.04, "↑ ГАЗ / ← КУРС →")
+    local rightBase, rThumb = createStick("RightStick", 1, 0.96, "↑ ВПЕРЁД / ← КРЕН →")
     leftThumb  = lThumb
     rightThumb = rThumb
 end
@@ -353,8 +359,9 @@ if isMobile then
 
     UserInputService.InputChanged:Connect(function(input)
         if input.UserInputType ~= Enum.UserInputType.Touch then return end
-        local dz = 0.07
+        local dz = 0.06
 
+        -- ЛЕВЫЙ СТИК: Газ (Y) и Рыскание (X)
         if input == leftTouchId and leftJoyCenter then
             local delta = Vector2.new(input.Position.X, input.Position.Y) - leftJoyCenter
             local norm = delta / JOY_RADIUS
@@ -363,13 +370,19 @@ if isMobile then
             local rawX = (math.abs(norm.X) > dz) and norm.X or 0
             local rawY = (math.abs(norm.Y) > dz) and norm.Y or 0
 
+            -- Стик вправо (rawX > 0) = поворот курса вправо
             yawIn = rawX * math.abs(rawX)
-            -- Вверх = газ 0.5 .. 1.0; Вниз = 0.5 .. 0.0; Центр = 0.5 (парение)
+
+            -- Стик вверх (на экране touch.Y меньше central.Y => rawY отрицательный):
+            -- -rawY > 0 => увеличение газа (0.5 .. 1.0)
+            -- Стик вниз (+rawY) => сброс газа (0.5 .. 0.0)
             throttleIn = math.clamp(0.5 - (rawY * 0.5), 0, 1)
 
             if leftThumb then
                 leftThumb.Position = UDim2.new(0.5 + norm.X * 0.4, 0, 0.5 + norm.Y * 0.4, 0)
             end
+
+        -- ПРАВЫЙ СТИК: Тангаж (Y) и Крен (X)
         elseif input == rightTouchId and rightJoyCenter then
             local delta = Vector2.new(input.Position.X, input.Position.Y) - rightJoyCenter
             local norm = delta / JOY_RADIUS
@@ -378,8 +391,12 @@ if isMobile then
             local rawX = (math.abs(norm.X) > dz) and norm.X or 0
             local rawY = (math.abs(norm.Y) > dz) and norm.Y or 0
 
-            rollIn  = rawX * math.abs(rawX)
-            pitchIn = -rawY * math.abs(rawY) -- вверх = нос вниз (вперёд)
+            -- Стик вправо (rawX > 0) = крен вправо
+            rollIn = rawX * math.abs(rawX)
+
+            -- Стик вверх (палец двигается вверх, rawY < 0):
+            -- pitchIn должен быть ПОЛОЖИТЕЛЬНЫМ (нос опускается, полёт ВПЕРЁД)
+            pitchIn = -rawY * math.abs(rawY)
 
             if rightThumb then
                 rightThumb.Position = UDim2.new(0.5 + norm.X * 0.4, 0, 0.5 + norm.Y * 0.4, 0)
@@ -391,7 +408,7 @@ if isMobile then
         leftTouchId = nil
         leftJoyCenter = nil
         yawIn = 0
-        throttleIn = 0.5 -- возврат к парению
+        throttleIn = 0.5 -- возврат к стабильному зависанию
         if leftThumb then leftThumb.Position = UDim2.new(0.5, 0, 0.5, 0) end
     end
 
@@ -433,20 +450,25 @@ local function readKeyboard()
     rollIn  = 0
     yawIn   = 0
 
+    -- W: Вперёд (нос вниз), S: Назад (нос вверх)
     if keysDown[Enum.KeyCode.W] then pitchIn =  1 end
     if keysDown[Enum.KeyCode.S] then pitchIn = -1 end
-    if keysDown[Enum.KeyCode.A] then rollIn  = -1 end
-    if keysDown[Enum.KeyCode.D] then rollIn  =  1 end
-    if keysDown[Enum.KeyCode.Q] then yawIn   = -1 end
-    if keysDown[Enum.KeyCode.E] then yawIn   =  1 end
 
-    -- Газ
+    -- D: Крен вправо, A: Крен влево
+    if keysDown[Enum.KeyCode.D] then rollIn =  1 end
+    if keysDown[Enum.KeyCode.A] then rollIn = -1 end
+
+    -- E: Поворот курса вправо, Q: Поворот курса влево
+    if keysDown[Enum.KeyCode.E] then yawIn =  1 end
+    if keysDown[Enum.KeyCode.Q] then yawIn = -1 end
+
+    -- Газ: Space = подъем, Shift = спуск
     if keysDown[Enum.KeyCode.Space] then
-        throttleIn = math.min(throttleIn + 0.035, 1)
+        throttleIn = math.min(throttleIn + 0.04, 1)
     elseif keysDown[Enum.KeyCode.LeftShift] then
-        throttleIn = math.max(throttleIn - 0.035, 0)
+        throttleIn = math.max(throttleIn - 0.04, 0)
     else
-        -- Плавный возврат к 0.5 (парение)
+        -- Плавный возврат к 0.5 (зависание)
         if throttleIn > 0.52 then
             throttleIn = throttleIn - 0.015
         elseif throttleIn < 0.48 then
@@ -455,7 +477,7 @@ local function readKeyboard()
     end
 end
 
--- ────────────────────── ВИДИМОСТЬ ПЕРСОНАЖА ────────────────
+-- ────────────────────── ПЕРСОНАЖ И ВИДИМОСТЬ ───────────────
 local function setCharVisible(vis)
     local char = player.Character
     if not char then return end
@@ -489,19 +511,16 @@ function mountDrone(drone)
     motorSound = droneBody:FindFirstChild("MotorSound")
 
     mounted = true
-    collisionCooldown = false
+    collisionLock = false
 
-    -- Начальные углы из ориентации дрона
     local _, ry, _ = droneBody.CFrame:ToOrientation()
     currentYaw   = ry
     currentPitch = 0
     currentRoll  = 0
     throttleIn   = 0.5
 
-    -- Камера в FPV режим
     camera.CameraType = Enum.CameraType.Scriptable
 
-    -- Звуки
     if motorSound then
         motorSound.Volume = 0.5
         motorSound.PlaybackSpeed = 0.95
@@ -519,15 +538,15 @@ function mountDrone(drone)
     if mobileGui then mobileGui.Enabled = true end
     if warningLabel then warningLabel.Visible = false end
 
-    -- Детектор столкновения
+    -- Клиентский детектор столкновения
     droneBody.Touched:Connect(function(hit)
-        if not mounted or collisionCooldown then return end
+        if not mounted or collisionLock then return end
         if hit:IsDescendantOf(droneModel) then return end
         if hit.Parent and hit.Parent:FindFirstChildOfClass("Humanoid") then return end
 
         local spd = droneBody.AssemblyLinearVelocity.Magnitude
         if spd >= Config.MIN_COLLISION_SPEED then
-            collisionCooldown = true
+            collisionLock = true
             crashExplode()
         end
     end)
@@ -563,7 +582,6 @@ function manualDetonate()
     if windSound  then windSound:Stop()  end
     setPropWash(false)
 
-    -- Белая вспышка на экране
     if flashFrame then
         flashFrame.BackgroundTransparency = 0.1
         TweenService:Create(flashFrame, TweenInfo.new(0.5), {BackgroundTransparency = 1}):Play()
@@ -579,14 +597,20 @@ function manualDetonate()
     droneBody  = nil
     bodyGyro   = nil
 
+    -- Мгновенно удаляем локально, чтобы модель гарантированно исчезла
+    if targetDrone then
+        pcall(function() targetDrone:Destroy() end)
+    end
+
     selfDestructRemote:FireServer(targetDrone)
 end
 
 -- ВЗРЫВ ПРИ СТОЛКНОВЕНИИ
 function crashExplode()
-    if not mounted or not droneBody then return end
-    local pos = droneBody.Position
+    if not mounted then return end
     mounted = false
+
+    local pos = droneBody and droneBody.Position
 
     if motorSound then motorSound:Stop() end
     if windSound  then windSound:Stop()  end
@@ -607,6 +631,11 @@ function crashExplode()
     droneBody  = nil
     bodyGyro   = nil
 
+    -- Мгновенно удаляем локально
+    if targetDrone then
+        pcall(function() targetDrone:Destroy() end)
+    end
+
     explodeRemote:FireServer(targetDrone, pos)
 end
 
@@ -616,15 +645,15 @@ local CAM_TILT_RAD = math.rad(Config.CAM_TILT)
 RunService.RenderStepped:Connect(function(dt)
     if not mounted or not droneBody or not bodyGyro then return end
 
-    -- 1. Чтение ввода
+    -- 1. Считывание ввода
     if not isMobile then
         readKeyboard()
     end
 
-    -- 2. Рыскание (Yaw — поворот курса вокруг вертикальной оси)
+    -- 2. Рыскание (Yaw — поворот курса влево/вправо на 360°)
     currentYaw = currentYaw - (yawIn * Config.YAW_SPEED * dt)
 
-    -- 3. Тангаж и крен (Pitch & Roll — наклон дрона)
+    -- 3. Тангаж (Pitch) и Крен (Roll)
     local maxTiltRad = math.rad(Config.MAX_TILT_DEG)
     local desiredPitch = pitchIn * maxTiltRad
     local desiredRoll  = rollIn  * maxTiltRad
@@ -633,47 +662,41 @@ RunService.RenderStepped:Connect(function(dt)
     currentPitch = currentPitch + (desiredPitch - currentPitch) * lerpK
     currentRoll  = currentRoll  + (desiredRoll  - currentRoll)  * lerpK
 
-    -- Устанавливаем ориентацию через BodyGyro
+    -- ВАЖНО: правильные неинвертированные углы!
+    -- pitchIn > 0 (W / стик вверх) => -currentPitch => нос опускается, полёт ВПЕРЁД!
+    -- rollIn > 0 (D / стик вправо) => -currentRoll => крен вправо, полёт ВПРАВО!
     local targetCF = CFrame.Angles(0, currentYaw, 0)
-        * CFrame.Angles(currentPitch, 0, 0)
+        * CFrame.Angles(-currentPitch, 0, 0)
         * CFrame.Angles(0, 0, -currentRoll)
+
     bodyGyro.CFrame = targetCF
 
-    -- 4. РЕАЛИСТИЧНАЯ ФИЗИКА ТЯГИ (Thrust Vector Physics)
-    -- Тяга всегда направлена строго вверх относительно корпуса дрона (UpVector)!
-    -- Когда дрон горизонтален: тяга вверх.
-    -- Когда дрон наклонен вперед: тяга тянет вверх и ВПЕРЁД!
-    -- Когда накренен: тяга тянет в сторону поворота!
+    -- 4. ТЯГА И АЭРОДИНАМИКА
+    -- Вектор тяги всегда направлен строго перпендикулярно раме вверх (UpVector)!
     local currentVel = droneBody.AssemblyLinearVelocity
-
     local gravity = workspace.Gravity
-    -- При throttle = 0.5: тяга ровно компенсирует гравитацию (hover)
-    -- При throttle = 1.0: тяга = 2.8 × гравитации (мощный подъем/ускорение)
-    -- При throttle = 0.0: тяга = 0 (падение)
+
+    -- При throttle = 0.5 тяга компенсирует гравитацию (hover)
+    -- При throttle = 1.0 тяга = 3.0 × гравитации (мощный подъем и разгон)
+    -- При throttle = 0.0 тяга = 0 (падение)
     local hoverAccel = gravity
     local maxAccel   = gravity * Config.MAX_THRUST_MULT
 
-    local thrustAccelMag = 0
+    local thrustMag = 0
     if throttleIn >= 0.5 then
-        thrustAccelMag = hoverAccel + (throttleIn - 0.5) * 2 * (maxAccel - hoverAccel)
+        thrustMag = hoverAccel + (throttleIn - 0.5) * 2 * (maxAccel - hoverAccel)
     else
-        thrustAccelMag = throttleIn * 2 * hoverAccel
+        thrustMag = throttleIn * 2 * hoverAccel
     end
 
-    -- Вектор тяги вдоль крыши дрона
-    local thrustAccelVector = targetCF.UpVector * thrustAccelMag
-
-    -- Вектор гравитации (вниз)
+    local thrustVector = targetCF.UpVector * thrustMag
     local gravityVector = Vector3.new(0, -gravity, 0)
-
-    -- Сопротивление воздуха (плавный накат и предел скорости)
     local dragVector = -currentVel * Config.HORIZONTAL_DRAG
 
-    -- Обновляем скорость физического тела
-    local newVel = currentVel + (thrustAccelVector + gravityVector + dragVector) * dt
+    local newVel = currentVel + (thrustVector + gravityVector + dragVector) * dt
     droneBody.AssemblyLinearVelocity = newVel
 
-    -- 5. Динамический звук мотора и ветра
+    -- 5. Звуковые эффекты
     if motorSound then
         motorSound.PlaybackSpeed = 0.75 + (throttleIn * 0.8)
         motorSound.Volume = 0.35 + (throttleIn * 0.45)
@@ -683,12 +706,12 @@ RunService.RenderStepped:Connect(function(dt)
         windSound.Volume = math.clamp(spd / Config.MAX_SPEED * 0.8, 0, 0.8)
     end
 
-    -- 6. FPV Камера — привязана к корпусу дрона с наклоном
+    -- 6. FPV Камера — закреплена на раме с фиксированным углом наклона вверх
     camera.CFrame = droneBody.CFrame
         * CFrame.new(0, 0.35, -1.3)
         * CFrame.Angles(-CAM_TILT_RAD, 0, 0)
 
-    -- 7. Проверка границ
+    -- 7. Проверка выхода за границы
     local dPos = droneBody.Position
     local hDist = Vector2.new(dPos.X, dPos.Z).Magnitude
     local isOut = (hDist > Config.BOUNDS_RADIUS)
@@ -713,6 +736,5 @@ player.CharacterAdded:Connect(function()
     end
 end)
 
--- Инициализация интерфейсов
 createHUD()
 createMobileUI()
