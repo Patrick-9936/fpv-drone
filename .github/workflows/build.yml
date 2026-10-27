@@ -1,0 +1,51 @@
+name: Build & Publish to Roblox
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rojo
+        run: |
+          curl -L https://github.com/rojo-rbx/rojo/releases/latest/download/rojo-linux-x86_64.zip -o rojo.zip
+          unzip rojo.zip -d /usr/local/bin/
+          chmod +x /usr/local/bin/rojo
+          rojo --version
+
+      - name: Build game.rbxl
+        run: rojo build -o game.rbxl
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: game-rbxl
+          path: game.rbxl
+
+      - name: Publish to Roblox
+        if: ${{ vars.ROBLOX_UNIVERSE_ID != '' && vars.ROBLOX_PLACE_ID != '' }}
+        env:
+          ROBLOX_API_KEY: ${{ secrets.ROBLOX_API_KEY }}
+          ROBLOX_UNIVERSE_ID: ${{ vars.ROBLOX_UNIVERSE_ID }}
+          ROBLOX_PLACE_ID: ${{ vars.ROBLOX_PLACE_ID }}
+        run: |
+          echo "🚀 Publishing to Roblox..."
+          HTTP_CODE=$(curl -s -o response.json -w "%{http_code}" -X POST \
+            "https://apis.roblox.com/universes/v1/${ROBLOX_UNIVERSE_ID}/places/${ROBLOX_PLACE_ID}/versions?versionType=Published" \
+            -H "x-api-key: ${ROBLOX_API_KEY}" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary "@game.rbxl")
+          
+          cat response.json
+          
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "✅ Published successfully!"
+          else
+            echo "❌ Failed (HTTP $HTTP_CODE)"
+            exit 1
+          fi
