@@ -1,6 +1,6 @@
 --[[
     MapBuilder - creates the game world:
-    ground, house, landing pad, obstacles, spawn
+    ground, house, landing pad, obstacles, target dummies
 ]]
 
 local function makePart(parent, name, pos, size, color, material, anchored)
@@ -21,8 +21,8 @@ local map = Instance.new("Folder")
 map.Name = "Map"
 map.Parent = workspace
 
------------- GROUND ------------
-makePart(map, "Ground", Vector3.new(0, -0.5, 0), Vector3.new(500, 1, 500),
+------------ GROUND (LARGE 900x900) ------------
+makePart(map, "Ground", Vector3.new(0, -0.5, 0), Vector3.new(900, 1, 900),
 	"Bright green", Enum.Material.Grass)
 
 ------------ HOUSE ------------
@@ -30,77 +30,69 @@ local house = Instance.new("Folder")
 house.Name = "House"
 house.Parent = map
 
-local H = Vector3.new(0, 0, 0) -- house origin
+local H = Vector3.new(0, 0, 0)
 local WC = "Brick yellow"
 local WM = Enum.Material.Brick
 
 -- Floor
 makePart(house, "Floor", H + Vector3.new(0, 0.25, 0),
-	Vector3.new(20, 0.5, 20), "Reddish brown", Enum.Material.Wood)
+	Vector3.new(22, 0.5, 22), "Reddish brown", Enum.Material.Wood)
 
--- Front wall (with door opening in the middle)
-makePart(house, "FrontL", H + Vector3.new(-6, 6, -10),
-	Vector3.new(8, 12, 0.5), WC, WM)
-makePart(house, "FrontR", H + Vector3.new(7, 6, -10),
-	Vector3.new(6, 12, 0.5), WC, WM)
-makePart(house, "FrontTop", H + Vector3.new(1, 10.5, -10),
-	Vector3.new(6, 3, 0.5), WC, WM)
+-- Front wall (with door)
+makePart(house, "FrontL", H + Vector3.new(-6.5, 6, -11),
+	Vector3.new(9, 12, 0.6), WC, WM)
+makePart(house, "FrontR", H + Vector3.new(7.5, 6, -11),
+	Vector3.new(7, 12, 0.6), WC, WM)
+makePart(house, "FrontTop", H + Vector3.new(0.5, 10.5, -11),
+	Vector3.new(7, 3, 0.6), WC, WM)
 
 -- Back wall
-makePart(house, "Back", H + Vector3.new(0, 6, 10),
-	Vector3.new(20, 12, 0.5), WC, WM)
+makePart(house, "Back", H + Vector3.new(0, 6, 11),
+	Vector3.new(22, 12, 0.6), WC, WM)
 
 -- Left wall
-makePart(house, "Left", H + Vector3.new(-10, 6, 0),
-	Vector3.new(0.5, 12, 20), WC, WM)
+makePart(house, "Left", H + Vector3.new(-11, 6, 0),
+	Vector3.new(0.6, 12, 22), WC, WM)
 
--- Right wall (with window gap)
-makePart(house, "RightBot", H + Vector3.new(10, 2.5, 0),
-	Vector3.new(0.5, 5, 20), WC, WM)
-makePart(house, "RightTop", H + Vector3.new(10, 10, 0),
-	Vector3.new(0.5, 4, 20), WC, WM)
-makePart(house, "RightWinL", H + Vector3.new(10, 6.5, -7),
-	Vector3.new(0.5, 3, 6), WC, WM)
-makePart(house, "RightWinR", H + Vector3.new(10, 6.5, 7),
-	Vector3.new(0.5, 3, 6), WC, WM)
+-- Right wall with window
+makePart(house, "RightBot", H + Vector3.new(11, 2.5, 0),
+	Vector3.new(0.6, 5, 22), WC, WM)
+makePart(house, "RightTop", H + Vector3.new(11, 10, 0),
+	Vector3.new(0.6, 4, 22), WC, WM)
+makePart(house, "RightWinL", H + Vector3.new(11, 6.5, -7.5),
+	Vector3.new(0.6, 3, 7), WC, WM)
+makePart(house, "RightWinR", H + Vector3.new(11, 6.5, 7.5),
+	Vector3.new(0.6, 3, 7), WC, WM)
 
 -- Roof
-makePart(house, "Roof", H + Vector3.new(0, 12.25, 0),
-	Vector3.new(22, 0.5, 22), "Dark red", Enum.Material.Slate)
+makePart(house, "Roof", H + Vector3.new(0, 12.3, 0),
+	Vector3.new(24, 0.6, 24), "Dark red", Enum.Material.Slate)
 
--- Table inside
-makePart(house, "TableTop", H + Vector3.new(-2, 3.5, 2),
-	Vector3.new(4, 0.3, 3), "Reddish brown", Enum.Material.Wood)
-makePart(house, "TableLeg1", H + Vector3.new(-3.5, 1.7, 0.8),
-	Vector3.new(0.3, 3, 0.3), "Reddish brown", Enum.Material.Wood)
-makePart(house, "TableLeg2", H + Vector3.new(-0.5, 1.7, 0.8),
-	Vector3.new(0.3, 3, 0.3), "Reddish brown", Enum.Material.Wood)
-makePart(house, "TableLeg3", H + Vector3.new(-3.5, 1.7, 3.2),
-	Vector3.new(0.3, 3, 0.3), "Reddish brown", Enum.Material.Wood)
-makePart(house, "TableLeg4", H + Vector3.new(-0.5, 1.7, 3.2),
-	Vector3.new(0.3, 3, 0.3), "Reddish brown", Enum.Material.Wood)
+-- Furniture inside
+makePart(house, "Table", H + Vector3.new(-2, 3, 2),
+	Vector3.new(5, 0.4, 4), "Reddish brown", Enum.Material.Wood)
 
 ------------ LANDING PAD ------------
 local pad = Instance.new("Folder")
 pad.Name = "LandingPad"
 pad.Parent = map
 
-makePart(pad, "PadBase", Vector3.new(25, 0.1, 0),
-	Vector3.new(8, 0.2, 8), "Medium stone grey", Enum.Material.Concrete)
+makePart(pad, "PadBase", Vector3.new(25, 0.15, 0),
+	Vector3.new(10, 0.3, 10), "Medium stone grey", Enum.Material.Concrete)
 
--- H marking
-makePart(pad, "HL", Vector3.new(24, 0.22, 0),
-	Vector3.new(0.3, 0.05, 4), "Bright red", Enum.Material.Neon)
-makePart(pad, "HR", Vector3.new(26, 0.22, 0),
-	Vector3.new(0.3, 0.05, 4), "Bright red", Enum.Material.Neon)
-makePart(pad, "HM", Vector3.new(25, 0.22, 0),
-	Vector3.new(2, 0.05, 0.3), "Bright red", Enum.Material.Neon)
+-- H Markings (Neon)
+makePart(pad, "HL", Vector3.new(23.8, 0.32, 0),
+	Vector3.new(0.4, 0.05, 5), "Bright red", Enum.Material.Neon)
+makePart(pad, "HR", Vector3.new(26.2, 0.32, 0),
+	Vector3.new(0.4, 0.05, 5), "Bright red", Enum.Material.Neon)
+makePart(pad, "HM", Vector3.new(25, 0.32, 0),
+	Vector3.new(2.4, 0.05, 0.4), "Bright red", Enum.Material.Neon)
 
------------- SPAWN ------------
+------------ SPAWN LOCATION ------------
 local spawn = Instance.new("SpawnLocation")
 spawn.Name = "Spawn"
-spawn.Position = Vector3.new(0, 1, -18)
-spawn.Size = Vector3.new(6, 1, 6)
+spawn.Position = Vector3.new(0, 1, -22)
+spawn.Size = Vector3.new(8, 1, 8)
 spawn.BrickColor = BrickColor.new("Medium stone grey")
 spawn.Material = Enum.Material.SmoothPlastic
 spawn.Anchored = true
@@ -108,56 +100,55 @@ spawn.TopSurface = Enum.SurfaceType.Smooth
 spawn.BottomSurface = Enum.SurfaceType.Smooth
 spawn.Parent = workspace
 
------------- OBSTACLES TO FLY AROUND ------------
+------------ OBSTACLES & TARGETS ------------
 local obs = Instance.new("Folder")
 obs.Name = "Obstacles"
 obs.Parent = map
 
--- Tower
-makePart(obs, "Tower", Vector3.new(60, 20, 40),
-	Vector3.new(6, 40, 6), "Dark stone grey", Enum.Material.Concrete)
-
--- Crates
-makePart(obs, "Crate1", Vector3.new(-30, 3, 25),
-	Vector3.new(6, 6, 6), "Brown", Enum.Material.Wood)
-makePart(obs, "Crate2", Vector3.new(-28, 9, 25),
-	Vector3.new(5, 6, 5), "Brown", Enum.Material.Wood)
-
--- Arch (fly through it!)
-makePart(obs, "ArchL", Vector3.new(40, 8, -30),
-	Vector3.new(3, 16, 3), "Medium stone grey", Enum.Material.Concrete)
-makePart(obs, "ArchR", Vector3.new(52, 8, -30),
-	Vector3.new(3, 16, 3), "Medium stone grey", Enum.Material.Concrete)
-makePart(obs, "ArchTop", Vector3.new(46, 17, -30),
-	Vector3.new(15, 2, 4), "Medium stone grey", Enum.Material.Concrete)
-
--- Bridge
-makePart(obs, "BridgeL", Vector3.new(-50, 5, -40),
-	Vector3.new(3, 10, 3), "Dark stone grey", Enum.Material.Concrete)
-makePart(obs, "BridgeR", Vector3.new(-50, 5, -52),
-	Vector3.new(3, 10, 3), "Dark stone grey", Enum.Material.Concrete)
-makePart(obs, "BridgeDeck", Vector3.new(-50, 10.5, -46),
-	Vector3.new(5, 1, 15), "Dark stone grey", Enum.Material.Concrete)
-
--- Walls (target practice)
-makePart(obs, "Wall1", Vector3.new(80, 5, 0),
-	Vector3.new(1, 10, 16), "Nougat", Enum.Material.Brick)
-makePart(obs, "Wall2", Vector3.new(80, 5, 25),
-	Vector3.new(1, 10, 16), "Nougat", Enum.Material.Brick)
-
--- Trees
-local function makeTree(pos)
-	makePart(obs, "Trunk", pos + Vector3.new(0, 4, 0),
-		Vector3.new(2, 8, 2), "Reddish brown", Enum.Material.Wood)
-	local leaves = makePart(obs, "Leaves", pos + Vector3.new(0, 11, 0),
-		Vector3.new(8, 7, 8), "Forest green", Enum.Material.Grass)
-	leaves.Shape = Enum.PartType.Ball
+-- Flight ring 1
+local function makeRing(pos, radius)
+	local segments = 12
+	for i = 1, segments do
+		local a1 = (i - 1) * (math.pi * 2 / segments)
+		local a2 = i * (math.pi * 2 / segments)
+		local midA = (a1 + a2) / 2
+		local p = makePart(obs, "RingSeg",
+			pos + Vector3.new(math.cos(midA) * radius, math.sin(midA) * radius, 0),
+			Vector3.new(radius * 0.55, 0.6, 0.6), "Bright yellow", Enum.Material.Neon)
+		p.CFrame = CFrame.new(p.Position) * CFrame.Angles(0, 0, midA + math.pi/2)
+	end
 end
 
-makeTree(Vector3.new(-20, 0, -35))
-makeTree(Vector3.new(15, 0, 40))
-makeTree(Vector3.new(-45, 0, 10))
-makeTree(Vector3.new(55, 0, -10))
-makeTree(Vector3.new(35, 0, 55))
+makeRing(Vector3.new(35, 14, -40), 9)
+makeRing(Vector3.new(35, 18, -90), 11)
+makeRing(Vector3.new(80, 20, -90), 12)
 
-print("[MapBuilder] Map built!")
+-- Tower
+makePart(obs, "Tower", Vector3.new(90, 25, 50),
+	Vector3.new(8, 50, 8), "Dark stone grey", Enum.Material.Concrete)
+
+-- Tunnel
+makePart(obs, "TunnelRoof", Vector3.new(-60, 10, -50),
+	Vector3.new(16, 1, 40), "Medium stone grey", Enum.Material.Concrete)
+makePart(obs, "TunnelL", Vector3.new(-68, 5, -50),
+	Vector3.new(1, 10, 40), "Medium stone grey", Enum.Material.Concrete)
+makePart(obs, "TunnelR", Vector3.new(-52, 5, -50),
+	Vector3.new(1, 10, 40), "Medium stone grey", Enum.Material.Concrete)
+
+-- Explosive Target Bunker
+local bunker = makePart(obs, "TargetBunker", Vector3.new(120, 5, -30),
+	Vector3.new(20, 10, 20), "Really black", Enum.Material.Metal)
+local bLabel = makePart(obs, "TargetLabel", Vector3.new(120, 8, -40.5),
+	Vector3.new(12, 3, 0.2), "Bright red", Enum.Material.Neon)
+
+-- Perimeter boundary pillars (visual boundary)
+local RADIUS = 360
+for deg = 0, 350, 30 do
+	local rad = math.rad(deg)
+	local px = math.cos(rad) * RADIUS
+	local pz = math.sin(rad) * RADIUS
+	local pillar = makePart(obs, "BoundaryPillar", Vector3.new(px, 15, pz),
+		Vector3.new(2, 30, 2), "Bright orange", Enum.Material.Neon)
+end
+
+print("[MapBuilder] Map with large arena, rings & boundary pillars built!")
