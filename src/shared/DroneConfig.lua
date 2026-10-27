@@ -1,31 +1,33 @@
 local DroneConfig = {}
 
--- Точка спавна дрона (на посадочной площадке)
-DroneConfig.DRONE_SPAWN = Vector3.new(25, 2.5, 0)
+-- ── ТОЧКА СПАВНА ДРОНА (на посадочной площадке) ──
+DroneConfig.DRONE_SPAWN = Vector3.new(25, 1.6, 0)
+
+-- ── АВТОСПАВН ──
+DroneConfig.RESPAWN_INTERVAL = 3    -- каждые 3 секунды проверяем площадку и спавним новый дрон
 
 -- ── ФИЗИКА ПОЛЁТА ──
--- (VectorForce + BodyGyro — без BodyVelocity)
-DroneConfig.MAX_TILT_DEG    = 45      -- макс наклон в Stabilized mode (градусы)
-DroneConfig.TILT_LERP_SPEED = 8.0    -- скорость отклика на стики
-DroneConfig.YAW_SPEED       = 2.8    -- рад/с рыскания
-DroneConfig.MAX_SPEED       = 80     -- макс скорость (стад/с) — для HUD
+DroneConfig.MAX_TILT_DEG    = 45    -- максимальный наклон (градусы)
+DroneConfig.TILT_LERP_SPEED = 9.0   -- скорость возврата/наклона
+DroneConfig.YAW_SPEED       = 3.2   -- скорость разворота (360 градусов)
+DroneConfig.HOVER_THRUST    = 196.2 -- компенсация гравитации Roblox
+DroneConfig.MAX_THRUST_MULT = 2.8   -- ускорение при 100% газе (2.8× веса)
+DroneConfig.HORIZONTAL_DRAG = 0.85  -- сопротивление воздуха (реалистичный накат)
+DroneConfig.MAX_SPEED       = 110   -- макс скорость для HUD (стад/с)
 
 -- ── КАМЕРА ──
-DroneConfig.CAM_TILT = 20            -- наклон FPV-камеры вверх (градусы)
+DroneConfig.CAM_TILT = 20           -- угол камеры FPV вверх (градусы)
 
--- ── ВЗРЫВ ──
-DroneConfig.EXPLOSION_RADIUS    = 25
-DroneConfig.EXPLOSION_POWER     = 350
-DroneConfig.MIN_COLLISION_SPEED = 12 -- стад/с для триггера взрыва
+-- ── ВЗРЫВ И СТОЛКНОВЕНИЯ ──
+DroneConfig.EXPLOSION_RADIUS    = 28
+DroneConfig.EXPLOSION_POWER     = 380
+DroneConfig.MIN_COLLISION_SPEED = 18 -- скорость для срабатывания взрыва при ударе
 
 -- ── ГРАНИЦЫ КАРТЫ ──
-DroneConfig.BOUNDS_RADIUS      = 380
-DroneConfig.BOUNDS_MIN_Y       = -8
-DroneConfig.BOUNDS_MAX_Y       = 300
-DroneConfig.OUT_OF_BOUNDS_TIME = 2.5 -- сек до подрыва
-
--- ── РЕСТАРТ ──
-DroneConfig.RESPAWN_TIME = 3         -- сек после взрыва до нового дрона
+DroneConfig.BOUNDS_RADIUS      = 400
+DroneConfig.BOUNDS_MIN_Y       = -15
+DroneConfig.BOUNDS_MAX_Y       = 320
+DroneConfig.OUT_OF_BOUNDS_TIME = 2.0 -- секунды до автоподрыва за картой
 
 -- ── ЗВУКИ ──
 DroneConfig.SOUND_MOTOR     = "rbxassetid://686885384"

@@ -1,8 +1,11 @@
 --[[
-    DroneClient — FPV Quadcopter Controller v4
-    Физика: VectorForce (тяга) + BodyGyro (ориентация)
-    БЕЗ BodyVelocity — чистая физика Roblox
-    Управление: левый стик = газ/рыскание, правый = тангаж/крен
+    DroneClient v5 — Реалистичный FPV квадрокоптер
+    - Физическая модель тяги: тяга направлена вдоль крыши дрона (CFrame.UpVector)
+    - Газ: 50% = парение (hover), 100% = мощный взлёт, 0% = свободное падение
+    - Аэродинамика: накат по инерции и естественное сопротивление воздуха
+    - Разворот 360° по рысканию, наклон до 45° по тангажу и крену
+    - Кнопка ручной детонации (💥 ПОДРЫВ) на экране и клавиша R / X
+    - Удобные сенсорные джойстики для телефона и поддержка ПК (WASD)
 ]]
 
 local Players           = game:GetService("Players")
@@ -18,67 +21,52 @@ local mountRemote        = remotes:WaitForChild("MountDrone")
 local unmountRemote      = remotes:WaitForChild("UnmountDrone")
 local explodeRemote      = remotes:WaitForChild("DroneExploded")
 local selfDestructRemote = remotes:WaitForChild("SelfDestruct")
-local droneReadyRemote   = remotes:WaitForChild("DroneReady")
 
 local player = Players.LocalPlayer
 local camera = workspace.CurrentCamera
 
--- ============================================================
---  СОСТОЯНИЕ ПОЛЁТА
--- ============================================================
-local mounted      = false
-local droneModel   = nil
-local droneBody    = nil
-local bodyGyro     = nil
-local thrustForce  = nil   -- VectorForce
-local motorSound   = nil
-local windSound    = nil
+-- ────────────────────── СОСТОЯНИЕ ──────────────────────────
+local mounted     = false
+local droneModel  = nil
+local droneBody   = nil
+local bodyGyro    = nil
+local motorSound  = nil
+local windSound   = nil
 
--- Углы ориентации
-local currentYaw   = 0
-local currentPitch = 0
-local currentRoll  = 0
+-- Ориентация
+local currentYaw   = 0   -- курс (Y)
+local currentPitch = 0   -- тангаж (X)
+local currentRoll  = 0   -- крен (Z)
 
--- Ввод (-1 до 1)
+-- Ввод (-1 .. 1)
 local pitchIn    = 0
 local rollIn     = 0
 local yawIn      = 0
-local throttleIn = 0   -- 0 = нет газа, 1 = полный газ
+local throttleIn = 0.5   -- 0.5 = парение, 1 = полный газ, 0 = выключен
 
-local keysDown = {}
-local collisionLock    = false
-local outOfBoundsTimer = 0
+local keysDown   = {}
+local isMobile   = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+local collisionCooldown = false
 
-local isMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
-
--- Константы физики
-local GRAVITY        = workspace.Gravity          -- обычно 196.2
-local DRONE_MASS     = 5                          -- кг (stub, пересчитываем при маунте)
-local HOVER_MULT     = 1.05                       -- 1.05× вес = парение
-local MAX_THRUST_MULT= 3.2                        -- полный газ = 3.2× вес
-
--- ============================================================
---  ЗВУКИ
--- ============================================================
-local function setupAudio()
+-- ────────────────────── ЗВУК ВЕТРА ─────────────────────────
+local function setupWindAudio()
     if not windSound then
         windSound = Instance.new("Sound")
-        windSound.Name = "DroneWindSFX"
+        windSound.Name = "WindSFX"
         windSound.SoundId = "rbxasset://sounds/action_falling.mp3"
         windSound.Looped = true
         windSound.Volume = 0
         windSound.Parent = camera
     end
 end
-setupAudio()
+setupWindAudio()
 
--- ============================================================
---  HUD / FPV OSD
--- ============================================================
-local hudGui, horizonBar, warningLabel, staticFrame
+-- ────────────────────── HUD / FPV OSD ──────────────────────
+local hudGui, horizonBar, warningLabel, flashFrame
 
 local function createHUD()
     if hudGui then hudGui:Destroy() end
+
     hudGui = Instance.new("ScreenGui")
     hudGui.Name = "DroneHUD"
     hudGui.ResetOnSpawn = false
@@ -86,28 +74,31 @@ local function createHUD()
     hudGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
     hudGui.Parent = player:WaitForChild("PlayerGui")
 
-    staticFrame = Instance.new("Frame")
-    staticFrame.Size = UDim2.new(1, 0, 1, 0)
-    staticFrame.BackgroundColor3 = Color3.fromRGB(255,255,255)
-    staticFrame.BackgroundTransparency = 1
-    staticFrame.BorderSizePixel = 0
-    staticFrame.Parent = hudGui
+    -- Вспышка при взрыве
+    flashFrame = Instance.new("Frame")
+    flashFrame.Name = "Flash"
+    flashFrame.Size = UDim2.new(1, 0, 1, 0)
+    flashFrame.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    flashFrame.BackgroundTransparency = 1
+    flashFrame.BorderSizePixel = 0
+    flashFrame.Parent = hudGui
 
     -- Виньетка
     local vig = Instance.new("ImageLabel")
+    vig.Name = "Vignette"
     vig.Size = UDim2.new(1, 0, 1, 0)
     vig.BackgroundTransparency = 1
     vig.Image = "rbxassetid://4576475446"
-    vig.ImageColor3 = Color3.fromRGB(0,0,0)
+    vig.ImageColor3 = Color3.fromRGB(0, 0, 0)
     vig.ImageTransparency = 0.55
     vig.Parent = hudGui
 
-    -- Прицел
+    -- Прицел (крестик)
     local chV = Instance.new("Frame")
     chV.Size = UDim2.new(0, 2, 0, 22)
     chV.AnchorPoint = Vector2.new(0.5, 0.5)
     chV.Position = UDim2.new(0.5, 0, 0.5, 0)
-    chV.BackgroundColor3 = Color3.fromRGB(0,255,120)
+    chV.BackgroundColor3 = Color3.fromRGB(0, 255, 120)
     chV.BackgroundTransparency = 0.2
     chV.BorderSizePixel = 0
     chV.Parent = hudGui
@@ -116,27 +107,28 @@ local function createHUD()
     chH.Size = UDim2.new(0, 22, 0, 2)
     chH.AnchorPoint = Vector2.new(0.5, 0.5)
     chH.Position = UDim2.new(0.5, 0, 0.5, 0)
-    chH.BackgroundColor3 = Color3.fromRGB(0,255,120)
+    chH.BackgroundColor3 = Color3.fromRGB(0, 255, 120)
     chH.BackgroundTransparency = 0.2
     chH.BorderSizePixel = 0
     chH.Parent = hudGui
 
-    -- Искусственный горизонт
+    -- Линия горизонта
     horizonBar = Instance.new("Frame")
+    horizonBar.Name = "Horizon"
     horizonBar.Size = UDim2.new(0, 90, 0, 2)
     horizonBar.AnchorPoint = Vector2.new(0.5, 0.5)
     horizonBar.Position = UDim2.new(0.5, 0, 0.5, 20)
-    horizonBar.BackgroundColor3 = Color3.fromRGB(0,255,120)
+    horizonBar.BackgroundColor3 = Color3.fromRGB(0, 255, 120)
     horizonBar.BackgroundTransparency = 0.4
     horizonBar.BorderSizePixel = 0
     horizonBar.Parent = hudGui
 
-    -- Инфо-панель
+    -- Панель OSD (слева сверху)
     local panel = Instance.new("Frame")
     panel.Name = "InfoPanel"
-    panel.Size = UDim2.new(0, 155, 0, 110)
-    panel.Position = UDim2.new(0, 12, 0, 12)
-    panel.BackgroundColor3 = Color3.fromRGB(10,15,10)
+    panel.Size = UDim2.new(0, 155, 0, 105)
+    panel.Position = UDim2.new(0, 14, 0, 14)
+    panel.BackgroundColor3 = Color3.fromRGB(10, 15, 10)
     panel.BackgroundTransparency = 0.45
     panel.BorderSizePixel = 0
     panel.Parent = hudGui
@@ -148,7 +140,7 @@ local function createHUD()
         l.Size = UDim2.new(1, -16, 0, 20)
         l.Position = UDim2.new(0, 10, 0, yPos)
         l.BackgroundTransparency = 1
-        l.TextColor3 = Color3.fromRGB(0,255,120)
+        l.TextColor3 = Color3.fromRGB(0, 255, 120)
         l.Font = Enum.Font.Code
         l.TextSize = 14
         l.TextXAlignment = Enum.TextXAlignment.Left
@@ -159,46 +151,97 @@ local function createHUD()
     makeLabel("Speed", 8)
     makeLabel("Alt", 30)
     makeLabel("Thr", 52)
-    makeLabel("Mode", 74)
+    makeLabel("Bat", 74)
 
-    -- REC (верхний правый угол)
+    -- REC индикатор
     local topR = Instance.new("TextLabel")
     topR.Name = "TopRightOSD"
-    topR.Size = UDim2.new(0, 130, 0, 26)
-    topR.Position = UDim2.new(1, -140, 0, 12)
+    topR.Size = UDim2.new(0, 140, 0, 26)
+    topR.Position = UDim2.new(1, -150, 0, 14)
     topR.BackgroundTransparency = 1
-    topR.TextColor3 = Color3.fromRGB(255,70,70)
+    topR.TextColor3 = Color3.fromRGB(255, 60, 60)
     topR.Font = Enum.Font.Code
     topR.TextSize = 15
-    topR.Text = "● REC  15.8V"
+    topR.Text = "● REC  4S 15.6V"
     topR.Parent = hudGui
 
-    -- Предупреждение
+    -- Предупреждение о границах
     warningLabel = Instance.new("TextLabel")
-    warningLabel.Size = UDim2.new(0, 360, 0, 40)
+    warningLabel.Name = "WarningBanner"
+    warningLabel.Size = UDim2.new(0, 360, 0, 38)
     warningLabel.AnchorPoint = Vector2.new(0.5, 0.5)
-    warningLabel.Position = UDim2.new(0.5, 0, 0.25, 0)
-    warningLabel.BackgroundColor3 = Color3.fromRGB(200,20,20)
+    warningLabel.Position = UDim2.new(0.5, 0, 0.22, 0)
+    warningLabel.BackgroundColor3 = Color3.fromRGB(210, 20, 20)
     warningLabel.BackgroundTransparency = 0.25
-    warningLabel.TextColor3 = Color3.fromRGB(255,255,255)
+    warningLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
     warningLabel.Font = Enum.Font.GothamBold
     warningLabel.TextSize = 15
-    warningLabel.Text = "⚠️ OUT OF BOUNDS"
+    warningLabel.Text = "⚠️ ВЫХОД ЗА ГРАНИЦЫ"
     warningLabel.Visible = false
     warningLabel.Parent = hudGui
     Instance.new("UICorner", warningLabel).CornerRadius = UDim.new(0, 8)
 
+    -- ВЕРХНЯЯ ПАНЕЛЬ УПРАВЛЕНИЯ (Кнопка ПОДРЫВ и ВЫХОД)
+    local topControls = Instance.new("Frame")
+    topControls.Name = "TopControls"
+    topControls.Size = UDim2.new(0, 260, 0, 42)
+    topControls.AnchorPoint = Vector2.new(0.5, 0)
+    topControls.Position = UDim2.new(0.5, 0, 0, 12)
+    topControls.BackgroundTransparency = 1
+    topControls.Parent = hudGui
+
+    -- 💥 КНОПКА РУЧНОЙ ДЕТОНАЦИИ
+    local boomBtn = Instance.new("TextButton")
+    boomBtn.Name = "BoomBtn"
+    boomBtn.Size = UDim2.new(0, 130, 0, 38)
+    boomBtn.Position = UDim2.new(0, 0, 0, 0)
+    boomBtn.BackgroundColor3 = Color3.fromRGB(220, 35, 35)
+    boomBtn.BackgroundTransparency = 0.15
+    boomBtn.BorderSizePixel = 0
+    boomBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    boomBtn.Font = Enum.Font.GothamBlack
+    boomBtn.TextSize = 14
+    boomBtn.Text = "💥 ПОДРЫВ"
+    boomBtn.Parent = topControls
+    Instance.new("UICorner", boomBtn).CornerRadius = UDim.new(0, 8)
+    boomBtn.MouseButton1Click:Connect(function()
+        if mounted then
+            manualDetonate()
+        end
+    end)
+
+    -- 🚪 КНОПКА ВЫХОДА
+    local exitBtn = Instance.new("TextButton")
+    exitBtn.Name = "ExitBtn"
+    exitBtn.Size = UDim2.new(0, 110, 0, 38)
+    exitBtn.Position = UDim2.new(0, 140, 0, 0)
+    exitBtn.BackgroundColor3 = Color3.fromRGB(60, 65, 75)
+    exitBtn.BackgroundTransparency = 0.25
+    exitBtn.BorderSizePixel = 0
+    exitBtn.TextColor3 = Color3.fromRGB(230, 230, 230)
+    exitBtn.Font = Enum.Font.GothamBold
+    exitBtn.TextSize = 13
+    exitBtn.Text = "🚪 ВЫХОД"
+    exitBtn.Parent = topControls
+    Instance.new("UICorner", exitBtn).CornerRadius = UDim.new(0, 8)
+    exitBtn.MouseButton1Click:Connect(function()
+        if mounted then
+            unmountDrone()
+        end
+    end)
+
+    -- Подсказка для ПК
     if not isMobile then
         local hint = Instance.new("TextLabel")
-        hint.Size = UDim2.new(0, 480, 0, 36)
+        hint.Size = UDim2.new(0, 520, 0, 34)
         hint.AnchorPoint = Vector2.new(0.5, 1)
-        hint.Position = UDim2.new(0.5, 0, 1, -10)
-        hint.BackgroundColor3 = Color3.fromRGB(0,0,0)
-        hint.BackgroundTransparency = 0.5
-        hint.TextColor3 = Color3.fromRGB(210,210,210)
+        hint.Position = UDim2.new(0.5, 0, 1, -12)
+        hint.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+        hint.BackgroundTransparency = 0.55
+        hint.TextColor3 = Color3.fromRGB(215, 215, 215)
         hint.Font = Enum.Font.Code
         hint.TextSize = 13
-        hint.Text = "W/S: Тангаж | A/D: Крен | Q/E: Рыскание | Space/Shift: Газ | R: Сброс | F: Выход"
+        hint.Text = "W/S: Тангаж | A/D: Крен | Q/E: Рыскание | Space/Shift: Газ | R: ПОДРЫВ | F: Выход"
         hint.Parent = hudGui
         Instance.new("UICorner", hint).CornerRadius = UDim.new(0, 6)
     end
@@ -216,23 +259,23 @@ local function updateHUD()
 
     local sLbl = panel:FindFirstChild("Speed")
     if sLbl then sLbl.Text = string.format("SPD  %d st/s", spd) end
+
     local aLbl = panel:FindFirstChild("Alt")
     if aLbl then aLbl.Text = string.format("ALT  %d st", alt) end
+
     local tLbl = panel:FindFirstChild("Thr")
     if tLbl then tLbl.Text = string.format("THR  %d %%", thrPct) end
-    local mLbl = panel:FindFirstChild("Mode")
-    if mLbl then mLbl.Text = "MODE [FPV]" end
+
+    local bLbl = panel:FindFirstChild("Bat")
+    if bLbl then bLbl.Text = "BAT  4S 98%" end
 
     if horizonBar then
         horizonBar.Rotation = math.deg(-currentRoll)
-        horizonBar.Position = UDim2.new(0.5, 0, 0.5,
-            math.clamp(math.deg(currentPitch) * 1.2, -60, 60))
+        horizonBar.Position = UDim2.new(0.5, 0, 0.5, math.clamp(math.deg(currentPitch) * 1.2, -60, 60))
     end
 end
 
--- ============================================================
---  МОБИЛЬНЫЕ ДЖОЙСТИКИ
--- ============================================================
+-- ────────────────────── МОБИЛЬНЫЕ СТИКИ ───────────────────
 local mobileGui
 local leftJoyCenter, rightJoyCenter
 local leftTouchId, rightTouchId
@@ -254,8 +297,8 @@ local function createMobileUI()
         base.Name = name .. "Base"
         base.Size = UDim2.new(0, 140, 0, 140)
         base.AnchorPoint = Vector2.new(xAnchor, 1)
-        base.Position = UDim2.new(xPos, 0, 1, -30)
-        base.BackgroundColor3 = Color3.fromRGB(255,255,255)
+        base.Position = UDim2.new(xPos, 0, 1, -25)
+        base.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
         base.BackgroundTransparency = 0.82
         base.BorderSizePixel = 0
         base.Parent = mobileGui
@@ -263,10 +306,10 @@ local function createMobileUI()
 
         local thumb = Instance.new("Frame")
         thumb.Name = "Thumb"
-        thumb.Size = UDim2.new(0, 54, 0, 54)
+        thumb.Size = UDim2.new(0, 55, 0, 55)
         thumb.AnchorPoint = Vector2.new(0.5, 0.5)
         thumb.Position = UDim2.new(0.5, 0, 0.5, 0)
-        thumb.BackgroundColor3 = Color3.fromRGB(0,200,255)
+        thumb.BackgroundColor3 = Color3.fromRGB(0, 220, 255)
         thumb.BackgroundTransparency = 0.3
         thumb.BorderSizePixel = 0
         thumb.Parent = base
@@ -274,9 +317,9 @@ local function createMobileUI()
 
         local lbl = Instance.new("TextLabel")
         lbl.Size = UDim2.new(1, 0, 0, 18)
-        lbl.Position = UDim2.new(0, 0, 0, -24)
+        lbl.Position = UDim2.new(0, 0, 0, -22)
         lbl.BackgroundTransparency = 1
-        lbl.TextColor3 = Color3.fromRGB(220,220,220)
+        lbl.TextColor3 = Color3.fromRGB(220, 220, 220)
         lbl.Font = Enum.Font.GothamBold
         lbl.TextSize = 12
         lbl.Text = labelTxt
@@ -285,57 +328,20 @@ local function createMobileUI()
         return base, thumb
     end
 
-    local leftBase, lThumb  = createStick("LeftStick",  0, 0.04, "↑ ГАЗ / ← ЮЗ →")
-    local rightBase, rThumb = createStick("RightStick", 1, 0.96, "↑ ТАНГАЖ / КРЕН →")
+    local leftBase, lThumb  = createStick("LeftStick",  0, 0.04, "ГАЗ / РЫСКАНИЕ")
+    local rightBase, rThumb = createStick("RightStick", 1, 0.96, "ТАНГАЖ / КРЕН")
     leftThumb  = lThumb
     rightThumb = rThumb
-
-    -- Кнопки сверху
-    local topBar = Instance.new("Frame")
-    topBar.Size = UDim2.new(0, 190, 0, 42)
-    topBar.AnchorPoint = Vector2.new(0.5, 0)
-    topBar.Position = UDim2.new(0.5, 0, 0, 10)
-    topBar.BackgroundTransparency = 1
-    topBar.Parent = mobileGui
-
-    local function makeBtn(name, xOff, text, bgCol, onClick)
-        local b = Instance.new("TextButton")
-        b.Name = name
-        b.Size = UDim2.new(0, 88, 0, 36)
-        b.Position = UDim2.new(0, xOff, 0, 0)
-        b.BackgroundColor3 = bgCol
-        b.BackgroundTransparency = 0.25
-        b.BorderSizePixel = 0
-        b.TextColor3 = Color3.new(1,1,1)
-        b.Font = Enum.Font.GothamBold
-        b.TextSize = 13
-        b.Text = text
-        b.Parent = topBar
-        Instance.new("UICorner", b).CornerRadius = UDim.new(0, 8)
-        b.MouseButton1Click:Connect(onClick)
-        return b
-    end
-
-    makeBtn("ExitBtn",  0,  "🚪 ВЫХОД",  Color3.fromRGB(180,40,40), function()
-        if mounted then unmountDrone() end
-    end)
-    makeBtn("ResetBtn", 100, "💥 СБРОС",  Color3.fromRGB(210,120,20), function()
-        if mounted then
-            selfDestructRemote:FireServer()
-            unmountDrone()
-        end
-    end)
 end
 
--- ============================================================
---  ОБРАБОТКА КАСАНИЙ
--- ============================================================
 if isMobile then
     UserInputService.InputBegan:Connect(function(input, gp)
         if gp or not mounted then return end
         if input.UserInputType ~= Enum.UserInputType.Touch then return end
+
         local pos = Vector2.new(input.Position.X, input.Position.Y)
         local screenW = camera.ViewportSize.X
+
         if pos.X < (screenW * 0.45) and not leftTouchId then
             leftTouchId = input
             leftJoyCenter = pos
@@ -347,17 +353,20 @@ if isMobile then
 
     UserInputService.InputChanged:Connect(function(input)
         if input.UserInputType ~= Enum.UserInputType.Touch then return end
-        local dz = 0.08
+        local dz = 0.07
 
         if input == leftTouchId and leftJoyCenter then
             local delta = Vector2.new(input.Position.X, input.Position.Y) - leftJoyCenter
             local norm = delta / JOY_RADIUS
             if norm.Magnitude > 1 then norm = norm.Unit end
+
             local rawX = (math.abs(norm.X) > dz) and norm.X or 0
             local rawY = (math.abs(norm.Y) > dz) and norm.Y or 0
+
             yawIn = rawX * math.abs(rawX)
-            -- вверх по стику = увеличение газа (0..1)
-            throttleIn = math.clamp((-rawY + 1) / 2, 0, 1)
+            -- Вверх = газ 0.5 .. 1.0; Вниз = 0.5 .. 0.0; Центр = 0.5 (парение)
+            throttleIn = math.clamp(0.5 - (rawY * 0.5), 0, 1)
+
             if leftThumb then
                 leftThumb.Position = UDim2.new(0.5 + norm.X * 0.4, 0, 0.5 + norm.Y * 0.4, 0)
             end
@@ -365,10 +374,13 @@ if isMobile then
             local delta = Vector2.new(input.Position.X, input.Position.Y) - rightJoyCenter
             local norm = delta / JOY_RADIUS
             if norm.Magnitude > 1 then norm = norm.Unit end
+
             local rawX = (math.abs(norm.X) > dz) and norm.X or 0
             local rawY = (math.abs(norm.Y) > dz) and norm.Y or 0
+
             rollIn  = rawX * math.abs(rawX)
-            pitchIn = -rawY * math.abs(rawY)
+            pitchIn = -rawY * math.abs(rawY) -- вверх = нос вниз (вперёд)
+
             if rightThumb then
                 rightThumb.Position = UDim2.new(0.5 + norm.X * 0.4, 0, 0.5 + norm.Y * 0.4, 0)
             end
@@ -376,35 +388,40 @@ if isMobile then
     end)
 
     local function resetLeft()
-        leftTouchId = nil; leftJoyCenter = nil
-        yawIn = 0; throttleIn = 0
+        leftTouchId = nil
+        leftJoyCenter = nil
+        yawIn = 0
+        throttleIn = 0.5 -- возврат к парению
         if leftThumb then leftThumb.Position = UDim2.new(0.5, 0, 0.5, 0) end
     end
+
     local function resetRight()
-        rightTouchId = nil; rightJoyCenter = nil
-        rollIn = 0; pitchIn = 0
+        rightTouchId = nil
+        rightJoyCenter = nil
+        rollIn = 0
+        pitchIn = 0
         if rightThumb then rightThumb.Position = UDim2.new(0.5, 0, 0.5, 0) end
     end
+
     UserInputService.InputEnded:Connect(function(input)
         if input == leftTouchId  then resetLeft()  end
         if input == rightTouchId then resetRight() end
     end)
 end
 
--- ============================================================
---  КЛАВИАТУРА
--- ============================================================
+-- ────────────────────── КЛАВИАТУРА (ПК) ────────────────────
 UserInputService.InputBegan:Connect(function(input, gp)
     if gp then return end
     if input.UserInputType == Enum.UserInputType.Keyboard then
         keysDown[input.KeyCode] = true
-        if input.KeyCode == Enum.KeyCode.F and mounted then unmountDrone()
-        elseif input.KeyCode == Enum.KeyCode.R and mounted then
-            selfDestructRemote:FireServer()
+        if input.KeyCode == Enum.KeyCode.F and mounted then
             unmountDrone()
+        elseif (input.KeyCode == Enum.KeyCode.R or input.KeyCode == Enum.KeyCode.X) and mounted then
+            manualDetonate()
         end
     end
 end)
+
 UserInputService.InputEnded:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.Keyboard then
         keysDown[input.KeyCode] = false
@@ -412,7 +429,9 @@ UserInputService.InputEnded:Connect(function(input)
 end)
 
 local function readKeyboard()
-    pitchIn = 0; rollIn = 0; yawIn = 0
+    pitchIn = 0
+    rollIn  = 0
+    yawIn   = 0
 
     if keysDown[Enum.KeyCode.W] then pitchIn =  1 end
     if keysDown[Enum.KeyCode.S] then pitchIn = -1 end
@@ -421,25 +440,22 @@ local function readKeyboard()
     if keysDown[Enum.KeyCode.Q] then yawIn   = -1 end
     if keysDown[Enum.KeyCode.E] then yawIn   =  1 end
 
-    -- Газ: Space = полный, Shift = убрать газ, иначе держим предыдущее значение
+    -- Газ
     if keysDown[Enum.KeyCode.Space] then
-        throttleIn = math.min(throttleIn + 0.04, 1)
+        throttleIn = math.min(throttleIn + 0.035, 1)
     elseif keysDown[Enum.KeyCode.LeftShift] then
-        throttleIn = math.max(throttleIn - 0.04, 0)
+        throttleIn = math.max(throttleIn - 0.035, 0)
     else
-        -- Без нажатия газ медленно падает до 0.5 (парение)
+        -- Плавный возврат к 0.5 (парение)
         if throttleIn > 0.52 then
             throttleIn = throttleIn - 0.015
         elseif throttleIn < 0.48 then
             throttleIn = throttleIn + 0.015
         end
     end
-    throttleIn = math.clamp(throttleIn, 0, 1)
 end
 
--- ============================================================
---  ВИДИМОСТЬ ПЕРСОНАЖА
--- ============================================================
+-- ────────────────────── ВИДИМОСТЬ ПЕРСОНАЖА ────────────────
 local function setCharVisible(vis)
     local char = player.Character
     if not char then return end
@@ -453,9 +469,6 @@ local function setCharVisible(vis)
     end
 end
 
--- ============================================================
---  ПРОПВОШ
--- ============================================================
 local function setPropWash(enabled)
     if not droneModel then return end
     for _, p in droneModel:GetDescendants() do
@@ -465,67 +478,57 @@ local function setPropWash(enabled)
     end
 end
 
--- ============================================================
---  МАУНТ / АНМАУНТ
--- ============================================================
+-- ────────────────────── МАУНТ / АНМАУНТ ────────────────────
 function mountDrone(drone)
     if mounted then return end
     droneModel = drone
     droneBody  = drone and drone.PrimaryPart
     if not droneBody then return end
 
-    bodyGyro    = droneBody:FindFirstChild("DroneGyro")
-    thrustForce = droneBody:FindFirstChild("Thrust")
-    motorSound  = droneBody:FindFirstChild("MotorSound")
-
-    if not bodyGyro or not thrustForce then return end
+    bodyGyro   = droneBody:FindFirstChild("DroneGyro")
+    motorSound = droneBody:FindFirstChild("MotorSound")
 
     mounted = true
-    collisionLock = false
-    outOfBoundsTimer = 0
+    collisionCooldown = false
 
-    -- Считаем массу тела (все части модели)
-    DRONE_MASS = 0
-    for _, p in droneModel:GetDescendants() do
-        if p:IsA("BasePart") then
-            DRONE_MASS = DRONE_MASS + p:GetMass()
-        end
-    end
-    if DRONE_MASS < 0.1 then DRONE_MASS = 5 end
-
-    -- Начальные углы
+    -- Начальные углы из ориентации дрона
     local _, ry, _ = droneBody.CFrame:ToOrientation()
     currentYaw   = ry
     currentPitch = 0
     currentRoll  = 0
-    throttleIn   = 0.5  -- стартуем с режима парения
+    throttleIn   = 0.5
 
-    -- Камера
+    -- Камера в FPV режим
     camera.CameraType = Enum.CameraType.Scriptable
 
-    -- Звук
+    -- Звуки
     if motorSound then
         motorSound.Volume = 0.5
-        motorSound.PlaybackSpeed = 0.9
+        motorSound.PlaybackSpeed = 0.95
         motorSound:Play()
     end
-    if windSound then windSound.Volume = 0; windSound:Play() end
+    if windSound then
+        windSound.Volume = 0
+        windSound:Play()
+    end
 
     setPropWash(true)
     setCharVisible(false)
-    if hudGui then hudGui.Enabled = true end
+
+    if hudGui    then hudGui.Enabled    = true end
     if mobileGui then mobileGui.Enabled = true end
     if warningLabel then warningLabel.Visible = false end
 
-    -- Коллизия
+    -- Детектор столкновения
     droneBody.Touched:Connect(function(hit)
-        if not mounted or collisionLock then return end
+        if not mounted or collisionCooldown then return end
         if hit:IsDescendantOf(droneModel) then return end
         if hit.Parent and hit.Parent:FindFirstChildOfClass("Humanoid") then return end
+
         local spd = droneBody.AssemblyLinearVelocity.Magnitude
         if spd >= Config.MIN_COLLISION_SPEED then
-            collisionLock = true
-            explodeDrone()
+            collisionCooldown = true
+            crashExplode()
         end
     end)
 end
@@ -534,8 +537,6 @@ function unmountDrone()
     if not mounted then return end
     mounted = false
 
-    -- Убрать тягу
-    if thrustForce then thrustForce.Force = Vector3.new(0, 0, 0) end
     if motorSound then motorSound:Stop() end
     if windSound  then windSound:Stop()  end
     setPropWash(false)
@@ -544,145 +545,174 @@ function unmountDrone()
     if hudGui    then hudGui.Enabled    = false end
     if mobileGui then mobileGui.Enabled = false end
     setCharVisible(true)
-    unmountRemote:FireServer()
 
-    droneModel  = nil
-    droneBody   = nil
-    bodyGyro    = nil
-    thrustForce = nil
+    local targetDrone = droneModel
+    droneModel = nil
+    droneBody  = nil
+    bodyGyro   = nil
+
+    unmountRemote:FireServer(targetDrone)
 end
 
-function explodeDrone()
-    if not droneBody then return end
-    local pos = droneBody.Position
+-- 💥 РУЧНАЯ ДЕТОНАЦИЯ
+function manualDetonate()
+    if not mounted then return end
     mounted = false
 
-    if thrustForce then thrustForce.Force = Vector3.new(0, 0, 0) end
     if motorSound then motorSound:Stop() end
     if windSound  then windSound:Stop()  end
+    setPropWash(false)
 
-    -- Экранный стат
-    if staticFrame then
-        staticFrame.BackgroundTransparency = 0.2
-        task.delay(0.2, function()
-            TweenService:Create(staticFrame, TweenInfo.new(0.6),
-                {BackgroundTransparency = 1}):Play()
-        end)
+    -- Белая вспышка на экране
+    if flashFrame then
+        flashFrame.BackgroundTransparency = 0.1
+        TweenService:Create(flashFrame, TweenInfo.new(0.5), {BackgroundTransparency = 1}):Play()
     end
 
     camera.CameraType = Enum.CameraType.Custom
     if hudGui    then hudGui.Enabled    = false end
     if mobileGui then mobileGui.Enabled = false end
     setCharVisible(true)
-    explodeRemote:FireServer(pos)
 
-    droneModel  = nil
-    droneBody   = nil
-    bodyGyro    = nil
-    thrustForce = nil
+    local targetDrone = droneModel
+    droneModel = nil
+    droneBody  = nil
+    bodyGyro   = nil
+
+    selfDestructRemote:FireServer(targetDrone)
 end
 
--- ============================================================
---  ПОЛЁТНЫЙ ЦИКЛ (RenderStepped)
--- ============================================================
-local CAM_TILT = math.rad(Config.CAM_TILT)
+-- ВЗРЫВ ПРИ СТОЛКНОВЕНИИ
+function crashExplode()
+    if not mounted or not droneBody then return end
+    local pos = droneBody.Position
+    mounted = false
+
+    if motorSound then motorSound:Stop() end
+    if windSound  then windSound:Stop()  end
+    setPropWash(false)
+
+    if flashFrame then
+        flashFrame.BackgroundTransparency = 0.1
+        TweenService:Create(flashFrame, TweenInfo.new(0.5), {BackgroundTransparency = 1}):Play()
+    end
+
+    camera.CameraType = Enum.CameraType.Custom
+    if hudGui    then hudGui.Enabled    = false end
+    if mobileGui then mobileGui.Enabled = false end
+    setCharVisible(true)
+
+    local targetDrone = droneModel
+    droneModel = nil
+    droneBody  = nil
+    bodyGyro   = nil
+
+    explodeRemote:FireServer(targetDrone, pos)
+end
+
+-- ────────────────────── ФИЗИЧЕСКИЙ ЦИКЛ ПОЛЁТА ─────────────
+local CAM_TILT_RAD = math.rad(Config.CAM_TILT)
 
 RunService.RenderStepped:Connect(function(dt)
-    if not mounted or not droneBody or not bodyGyro or not thrustForce then return end
+    if not mounted or not droneBody or not bodyGyro then return end
 
-    -- 1. Ввод
-    if not isMobile then readKeyboard() end
+    -- 1. Чтение ввода
+    if not isMobile then
+        readKeyboard()
+    end
 
-    -- 2. Рыскание
+    -- 2. Рыскание (Yaw — поворот курса вокруг вертикальной оси)
     currentYaw = currentYaw - (yawIn * Config.YAW_SPEED * dt)
 
-    -- 3. Тангаж и крен (Stabilized mode)
-    local maxTilt = math.rad(Config.MAX_TILT_DEG)
-    local desiredPitch = pitchIn * maxTilt
-    local desiredRoll  = rollIn  * maxTilt
+    -- 3. Тангаж и крен (Pitch & Roll — наклон дрона)
+    local maxTiltRad = math.rad(Config.MAX_TILT_DEG)
+    local desiredPitch = pitchIn * maxTiltRad
+    local desiredRoll  = rollIn  * maxTiltRad
 
     local lerpK = math.clamp(Config.TILT_LERP_SPEED * dt, 0, 1)
     currentPitch = currentPitch + (desiredPitch - currentPitch) * lerpK
     currentRoll  = currentRoll  + (desiredRoll  - currentRoll)  * lerpK
 
-    -- Целевая ориентация
+    -- Устанавливаем ориентацию через BodyGyro
     local targetCF = CFrame.Angles(0, currentYaw, 0)
         * CFrame.Angles(currentPitch, 0, 0)
         * CFrame.Angles(0, 0, -currentRoll)
     bodyGyro.CFrame = targetCF
 
-    -- 4. ТЯГА (VectorForce) — главное исправление!
-    --    Тяга = throttleIn (0..1) маппируется:
-    --      0.0 → 0 (дрон падает)
-    --      0.5 → hover (компенсация гравитации)
-    --      1.0 → MAX_THRUST_MULT × вес
-    local hoverForce = DRONE_MASS * GRAVITY * HOVER_MULT
-    local maxForce   = DRONE_MASS * GRAVITY * MAX_THRUST_MULT
-    local thrustMag  = hoverForce + (throttleIn - 0.5) * 2 * (maxForce - hoverForce)
-    thrustMag = math.clamp(thrustMag, 0, maxForce)
+    -- 4. РЕАЛИСТИЧНАЯ ФИЗИКА ТЯГИ (Thrust Vector Physics)
+    -- Тяга всегда направлена строго вверх относительно корпуса дрона (UpVector)!
+    -- Когда дрон горизонтален: тяга вверх.
+    -- Когда дрон наклонен вперед: тяга тянет вверх и ВПЕРЁД!
+    -- Когда накренен: тяга тянет в сторону поворота!
+    local currentVel = droneBody.AssemblyLinearVelocity
 
-    -- VectorForce в локальных координатах Attachment (вверх = +Y локально)
-    thrustForce.Force = Vector3.new(0, thrustMag, 0)
+    local gravity = workspace.Gravity
+    -- При throttle = 0.5: тяга ровно компенсирует гравитацию (hover)
+    -- При throttle = 1.0: тяга = 2.8 × гравитации (мощный подъем/ускорение)
+    -- При throttle = 0.0: тяга = 0 (падение)
+    local hoverAccel = gravity
+    local maxAccel   = gravity * Config.MAX_THRUST_MULT
 
-    -- 5. Звук
-    if motorSound then
-        motorSound.PlaybackSpeed = 0.8 + throttleIn * 0.7
-        motorSound.Volume = 0.3 + throttleIn * 0.5
+    local thrustAccelMag = 0
+    if throttleIn >= 0.5 then
+        thrustAccelMag = hoverAccel + (throttleIn - 0.5) * 2 * (maxAccel - hoverAccel)
+    else
+        thrustAccelMag = throttleIn * 2 * hoverAccel
     end
-    local spd = droneBody.AssemblyLinearVelocity.Magnitude
+
+    -- Вектор тяги вдоль крыши дрона
+    local thrustAccelVector = targetCF.UpVector * thrustAccelMag
+
+    -- Вектор гравитации (вниз)
+    local gravityVector = Vector3.new(0, -gravity, 0)
+
+    -- Сопротивление воздуха (плавный накат и предел скорости)
+    local dragVector = -currentVel * Config.HORIZONTAL_DRAG
+
+    -- Обновляем скорость физического тела
+    local newVel = currentVel + (thrustAccelVector + gravityVector + dragVector) * dt
+    droneBody.AssemblyLinearVelocity = newVel
+
+    -- 5. Динамический звук мотора и ветра
+    if motorSound then
+        motorSound.PlaybackSpeed = 0.75 + (throttleIn * 0.8)
+        motorSound.Volume = 0.35 + (throttleIn * 0.45)
+    end
     if windSound then
+        local spd = newVel.Magnitude
         windSound.Volume = math.clamp(spd / Config.MAX_SPEED * 0.8, 0, 0.8)
     end
 
-    -- 6. FPV камера
+    -- 6. FPV Камера — привязана к корпусу дрона с наклоном
     camera.CFrame = droneBody.CFrame
-        * CFrame.new(0, 0.5, -1.5)
-        * CFrame.Angles(-CAM_TILT, 0, 0)
+        * CFrame.new(0, 0.35, -1.3)
+        * CFrame.Angles(-CAM_TILT_RAD, 0, 0)
 
-    -- 7. Границы
-    local dpos = droneBody.Position
-    local horiz = Vector2.new(dpos.X, dpos.Z).Magnitude
-    local isOut = (horiz > Config.BOUNDS_RADIUS)
-        or (dpos.Y < Config.BOUNDS_MIN_Y)
-        or (dpos.Y > Config.BOUNDS_MAX_Y)
+    -- 7. Проверка границ
+    local dPos = droneBody.Position
+    local hDist = Vector2.new(dPos.X, dPos.Z).Magnitude
+    local isOut = (hDist > Config.BOUNDS_RADIUS)
+        or (dPos.Y < Config.BOUNDS_MIN_Y)
+        or (dPos.Y > Config.BOUNDS_MAX_Y)
 
-    if isOut then
-        outOfBoundsTimer = outOfBoundsTimer + dt
-        if warningLabel then
-            warningLabel.Visible = true
-            warningLabel.Text = string.format(
-                "⚠️ СИГНАЛ ПОТЕРЯН — ПОДРЫВ ЧЕРЕЗ %.1f с",
-                math.max(0, Config.OUT_OF_BOUNDS_TIME - outOfBoundsTimer))
-        end
-        if outOfBoundsTimer >= Config.OUT_OF_BOUNDS_TIME then
-            collisionLock = true
-            explodeDrone()
-        end
-    else
-        outOfBoundsTimer = 0
-        if warningLabel then warningLabel.Visible = false end
+    if warningLabel then
+        warningLabel.Visible = isOut
     end
 
     updateHUD()
 end)
 
--- ============================================================
---  REMOTE HANDLERS
--- ============================================================
+-- ────────────────────── REMOTE LISTENERS ───────────────────
 mountRemote.OnClientEvent:Connect(function(drone)
     mountDrone(drone)
 end)
 
-droneReadyRemote.OnClientEvent:Connect(function()
-    collisionLock = false
-end)
-
 player.CharacterAdded:Connect(function()
-    if mounted then unmountDrone() end
+    if mounted then
+        unmountDrone()
+    end
 end)
 
--- ============================================================
---  ИНИЦИАЛИЗАЦИЯ GUI
--- ============================================================
+-- Инициализация интерфейсов
 createHUD()
 createMobileUI()
