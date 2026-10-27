@@ -13,9 +13,11 @@ jobs:
 
       - name: Install Rojo
         run: |
-          curl -L https://github.com/rojo-rbx/rojo/releases/latest/download/rojo-linux-x86_64.zip -o rojo.zip
-          unzip rojo.zip -d /usr/local/bin/
-          chmod +x /usr/local/bin/rojo
+          ROJO_VERSION="7.7.1"
+          curl -fSL "https://github.com/rojo-rbx/rojo/releases/download/v${ROJO_VERSION}/rojo-${ROJO_VERSION}-linux-x86_64.zip" -o rojo.zip
+          unzip rojo.zip
+          chmod +x rojo
+          sudo mv rojo /usr/local/bin/
           rojo --version
 
       - name: Build game.rbxl
