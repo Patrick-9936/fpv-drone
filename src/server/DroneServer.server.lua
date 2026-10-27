@@ -1,9 +1,10 @@
 --[[
-    DroneServer v6
-    - Исправлен спавн: дрон можно взять СРАЗУ (ClickDetector на всей модели + мгновенный ProximityPrompt)
-    - Исправлено исчезновение взорвавшегося дрона: гарантированное удаление на сервере через таблицу playerDrones
-    - Автоспавн каждые 3 секунды: если дрон взлетел, на площадке сразу готовится новый для друзей
-    - Серверный и клиентский детектор удара и ручная детонация (💥 ПОДРЫВ)
+    DroneServer v7
+    - ИСПРАВЛЕН ВЗЯТИЕ ДРОНА: большой невидимый Hitbox (4.5x2.5x4.5) с ClickDetector и ProximityPrompt
+      Теперь дрон берётся мгновенно с любого клика или нажатия на телефоне/ПК!
+    - ИСПРАВЛЕН САМОВОЛЬНЫЙ ВЗРЫВ: убран сырой Touched на сервере, взрыв безопасен для пилота
+      (BlastRadius = 0, не убивает стоящего рядом игрока)
+    - Автоспавн каждые 3 секунды: если дрон взят, на площадке сразу появляется новый!
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -36,7 +37,7 @@ local unmountRemote      = getOrMakeRemote("UnmountDrone")
 local explodeRemote      = getOrMakeRemote("DroneExploded")
 local selfDestructRemote = getOrMakeRemote("SelfDestruct")
 
--- ────────────────────── СОСТОЯНИЕ ──────────────────────────
+-- ────────────────────── ПАПКА ДРОНОВ ────────────────────────
 local dronesFolder = workspace:FindFirstChild("Drones")
 if not dronesFolder then
     dronesFolder = Instance.new("Folder")
@@ -44,7 +45,6 @@ if not dronesFolder then
     dronesFolder.Parent = workspace
 end
 
--- Таблица соответствия: player -> droneModel
 local playerDrones = {}
 
 -- ────────────────────── ВСПОМОГАТЕЛЬНЫЕ ────────────────────
@@ -72,12 +72,14 @@ local function makePart(parent, name, size, cf, color, mat, canCollide, shape, t
     return p
 end
 
--- ────────────────────── ВЗРЫВ И ЭФФЕКТЫ ────────────────────
+-- ────────────────────── ВЗРЫВ (БЕЗОПАСНЫЙ ДЛЯ ПИЛОТА) ───────
 local function createExplosionFX(pos)
+    -- BlastRadius = 0 и BlastPressure = 0 гарантируют, что взрыв
+    -- воспроизводит громкий звук и вспышку, но НЕ убивает стоящего на земле игрока!
     local exp = Instance.new("Explosion")
     exp.Position = pos
-    exp.BlastRadius = Config.EXPLOSION_RADIUS
-    exp.BlastPressure = Config.EXPLOSION_POWER
+    exp.BlastRadius = 0
+    exp.BlastPressure = 0
     exp.DestroyJointRadiusPercent = 0
     exp.Parent = workspace
 
@@ -121,7 +123,6 @@ local function createExplosionFX(pos)
     Debris:AddItem(sp, 5)
 end
 
--- Гарантированное удаление дрона
 local function destroyDrone(drone, pos)
     if not drone then return end
 
@@ -133,7 +134,6 @@ local function destroyDrone(drone, pos)
 
     createExplosionFX(explodePos)
 
-    -- Удаляем из списка активных
     for plr, d in pairs(playerDrones) do
         if d == drone then
             playerDrones[plr] = nil
@@ -162,17 +162,17 @@ local function buildDroneAt(spawnPos)
     local body = makePart(model, "Body",
         Vector3.new(2.2, 0.25, 2.2), baseCF,
         "Dark stone grey", Enum.Material.DiamondPlate, true)
-    body.Anchored = true  -- зафиксирован на площадке пока не взят
+    body.Anchored = true  -- надежно стоит на площадке
     model.PrimaryPart = body
 
-    -- 2. Верхняя пластина (TopPlate)
+    -- 2. Верхняя пластина
     local topPlate = makePart(model, "TopPlate",
         Vector3.new(1.3, 0.1, 1.3), baseCF * CFrame.new(0, 0.17, 0),
         "Really black", Enum.Material.SmoothPlastic, false)
     topPlate.Massless = true
     weld(body, topPlate)
 
-    -- 3. Аккумулятор LiPo
+    -- 3. Аккумулятор
     local battery = makePart(model, "LiPoBattery",
         Vector3.new(0.75, 0.45, 1.15), baseCF * CFrame.new(0, 0.42, 0.05),
         "Bright yellow", Enum.Material.SmoothPlastic, false)
@@ -243,7 +243,7 @@ local function buildDroneAt(spawnPos)
         pe.Parent    = motor
     end
 
-    -- 5. FPV Камера спереди (наклон вверх)
+    -- 5. Камера
     local camCF = baseCF * CFrame.new(0, 0.22, -1.25) * CFrame.Angles(math.rad(-Config.CAM_TILT), 0, 0)
     local camBody = makePart(model, "CamBody",
         Vector3.new(0.45, 0.35, 0.45), camCF,
@@ -257,7 +257,7 @@ local function buildDroneAt(spawnPos)
     lens.Massless = true
     weld(body, lens)
 
-    -- 6. Огни LED
+    -- 6. Огни
     local ledFL = makePart(model, "LED_FL",
         Vector3.new(0.12, 0.08, 0.12), baseCF * CFrame.new( 0.75, -0.05, -0.95),
         "Lime green", Enum.Material.Neon, false)
@@ -313,7 +313,7 @@ local function buildDroneAt(spawnPos)
     beepSnd.Volume = 0.75
     beepSnd.Parent = body
 
-    -- 9. BodyGyro (управление ориентацией)
+    -- 9. BodyGyro
     local gyro = Instance.new("BodyGyro")
     gyro.Name = "DroneGyro"
     gyro.MaxTorque = Vector3.new(4e5, 4e5, 4e5)
@@ -332,13 +332,12 @@ local function buildDroneAt(spawnPos)
     hl.Enabled = true
     hl.Parent = model
 
-    -- 11. Функция взятия дрона (вызывается мгновенно при клике или E)
+    -- 11. ФУНКЦИЯ ЗАХВАТА ДРОНА (Мгновенно)
     local function claimDrone(player)
         if model:GetAttribute("IsPiloted") == true then return end
         model:SetAttribute("IsPiloted", true)
         model:SetAttribute("PilotUserId", player.UserId)
 
-        -- Если у игрока уже был дрон — удаляем старый
         if playerDrones[player] and playerDrones[player] ~= model then
             destroyDrone(playerDrones[player])
         end
@@ -346,13 +345,16 @@ local function buildDroneAt(spawnPos)
 
         hl.Enabled = false
 
-        -- Отключаем детекторы чтобы повторно не кликалось
-        local prompt = body:FindFirstChildOfClass("ProximityPrompt")
-        if prompt then prompt.Enabled = false end
-        local cd = model:FindFirstChildOfClass("ClickDetector")
-        if cd then cd.MaxActivationDistance = 0 end
+        -- Отключаем клики и промпты
+        local hb = model:FindFirstChild("Hitbox")
+        if hb then
+            local p = hb:FindFirstChildOfClass("ProximityPrompt")
+            if p then p.Enabled = false end
+            local c = hb:FindFirstChildOfClass("ClickDetector")
+            if c then c.MaxActivationDistance = 0 end
+        end
 
-        -- Включаем физику и передаем Network Ownership
+        -- Включаем физику и передаем Network Ownership клиенту
         body.Anchored = false
         pcall(function()
             body:SetNetworkOwner(player)
@@ -360,46 +362,45 @@ local function buildDroneAt(spawnPos)
 
         beepSnd:Play()
 
-        -- Запускаем на клиенте
+        -- Уведомляем клиента
         mountRemote:FireClient(player, model)
-        print(string.format("[DroneServer] %s успешно взял дрон %s", player.Name, model.Name))
+        print(string.format("[DroneServer] %s мгновенно взял дрон %s", player.Name, model.Name))
     end
 
-    -- 12. МГНОВЕННЫЙ ProximityPrompt (HoldDuration = 0, срабатывает мгновенно)
+    -- 12. БОЛЬШОЙ НЕВИДИМЫЙ HITBOX ДЛЯ 100% УДОБНОГО ВЗЯТИЯ
+    -- Охватывает весь дрон (4.5 x 2.5 x 4.5 studs)
+    local hitbox = makePart(model, "Hitbox",
+        Vector3.new(4.5, 2.5, 4.5), baseCF * CFrame.new(0, 0.5, 0),
+        "Really black", Enum.Material.SmoothPlastic, false, nil, 1)
+    hitbox.Massless = true
+    hitbox.CanQuery = true
+    hitbox.CanTouch = true
+    weld(body, hitbox)
+
+    -- ClickDetector на Hitbox (нажимается в ЛЮБУЮ точку дрона!)
+    local click = Instance.new("ClickDetector")
+    click.Name = "DroneClick"
+    click.MaxActivationDistance = 35
+    click.Parent = hitbox
+    click.MouseClick:Connect(claimDrone)
+
+    -- ClickDetector на Body (дополнительно)
+    local bodyClick = Instance.new("ClickDetector")
+    bodyClick.Name = "BodyClick"
+    bodyClick.MaxActivationDistance = 35
+    bodyClick.Parent = body
+    bodyClick.MouseClick:Connect(claimDrone)
+
+    -- Мгновенный ProximityPrompt (0 сек удержания)
     local prompt = Instance.new("ProximityPrompt")
     prompt.ActionText = "Взлететь"
     prompt.ObjectText = "FPV Дрон"
     prompt.HoldDuration = 0
-    prompt.MaxActivationDistance = 16
+    prompt.MaxActivationDistance = 18
     prompt.KeyboardKeyCode = Enum.KeyCode.E
     prompt.RequiresLineOfSight = false
-    prompt.Parent = body
-
-    prompt.Triggered:Connect(function(player)
-        claimDrone(player)
-    end)
-
-    -- 13. ClickDetector ПРИВЯЗАН К МОДЕЛИ (нажатие на ЛЮБУЮ часть дрона срабатывает!)
-    local click = Instance.new("ClickDetector")
-    click.Name = "DroneClick"
-    click.MaxActivationDistance = 32
-    click.Parent = model
-
-    click.MouseClick:Connect(function(player)
-        claimDrone(player)
-    end)
-
-    -- Серверный детектор удара (дублирует клиентский)
-    body.Touched:Connect(function(hit)
-        if model:GetAttribute("IsPiloted") ~= true then return end
-        if hit:IsDescendantOf(model) then return end
-        if hit.Parent and hit.Parent:FindFirstChildOfClass("Humanoid") then return end
-
-        local spd = body.AssemblyLinearVelocity.Magnitude
-        if spd >= Config.MIN_COLLISION_SPEED then
-            destroyDrone(model, body.Position)
-        end
-    end)
+    prompt.Parent = hitbox
+    prompt.Triggered:Connect(claimDrone)
 
     model.Parent = dronesFolder
     return model
@@ -428,7 +429,6 @@ unmountRemote.OnServerEvent:Connect(function(player, clientDrone)
     local target = playerDrones[player] or clientDrone
     playerDrones[player] = nil
     if target and target.Parent then
-        -- Если игрок вышел, уничтожаем дрон через 3 секунды чтобы не засорять карту
         target:SetAttribute("IsPiloted", false)
         target:SetAttribute("PilotUserId", 0)
         pcall(function()
@@ -442,7 +442,7 @@ unmountRemote.OnServerEvent:Connect(function(player, clientDrone)
     end
 end)
 
--- ИГРОК ВЫШЕЛ ИЗ ИГРЫ
+-- ИГРОК ВЫШЕЛ
 Players.PlayerRemoving:Connect(function(player)
     local target = playerDrones[player]
     playerDrones[player] = nil
@@ -452,7 +452,6 @@ Players.PlayerRemoving:Connect(function(player)
 end)
 
 -- ────────────────────── АВТОСПАВНЕР (КАЖДЫЕ 3 СЕК) ──────────
--- Проверяет посадочную площадку. Если там нет свободного дрона — спавнит!
 task.spawn(function()
     while true do
         local padFree = true
@@ -491,4 +490,4 @@ RunService.Heartbeat:Connect(function()
     end
 end)
 
-print("[DroneServer] Сервер дронов v6 активен!")
+print("[DroneServer] Сервер дронов v7 активен!")

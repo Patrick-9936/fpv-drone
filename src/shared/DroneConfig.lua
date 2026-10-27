@@ -1,7 +1,7 @@
 local DroneConfig = {}
 
 -- ── ТОЧКА СПАВНА ДРОНА (на посадочной площадке) ──
-DroneConfig.DRONE_SPAWN = Vector3.new(25, 1.6, 0)
+DroneConfig.DRONE_SPAWN = Vector3.new(25, 1.8, 0)
 
 -- ── АВТОСПАВН ──
 DroneConfig.RESPAWN_INTERVAL = 3    -- каждые 3 секунды проверяем площадку
@@ -17,10 +17,9 @@ DroneConfig.MAX_SPEED       = 110   -- макс скорость для HUD (с�
 -- ── КАМЕРА ──
 DroneConfig.CAM_TILT = 18           -- наклон FPV камеры вверх (градусы)
 
--- ── ВЗРЫВ И СТОЛКНОВЕНИЯ ──
-DroneConfig.EXPLOSION_RADIUS    = 28
-DroneConfig.EXPLOSION_POWER     = 380
-DroneConfig.MIN_COLLISION_SPEED = 10 -- взрыв при ударе на скорости от 10 стад/с
+-- ── СТОЛКНОВЕНИЯ И ВЗРЫВЫ ──
+DroneConfig.MIN_COLLISION_SPEED = 28 -- взрыв ТОЛЬКО при сильном ударе (от 28 стад/с)
+DroneConfig.TAKEOFF_GRACE_TIME  = 3.0 -- 3 секунды бессмертия при взлёте (чтобы не взрывался на площадке!)
 
 -- ── ГРАНИЦЫ КАРТЫ ──
 DroneConfig.BOUNDS_RADIUS      = 400
