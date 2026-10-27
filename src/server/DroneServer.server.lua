@@ -1,10 +1,9 @@
 --[[
-    DroneServer v7
-    - ИСПРАВЛЕН ВЗЯТИЕ ДРОНА: большой невидимый Hitbox (4.5x2.5x4.5) с ClickDetector и ProximityPrompt
-      Теперь дрон берётся мгновенно с любого клика или нажатия на телефоне/ПК!
-    - ИСПРАВЛЕН САМОВОЛЬНЫЙ ВЗРЫВ: убран сырой Touched на сервере, взрыв безопасен для пилота
-      (BlastRadius = 0, не убивает стоящего рядом игрока)
-    - Автоспавн каждые 3 секунды: если дрон взят, на площадке сразу появляется новый!
+    DroneServer v8
+    - УСТРАНЁН RACE CONDITION: взрыв старого разбитого дрона больше НИКОГДА не задевает новый дрон!
+    - Сервер теперь идентифицирует каждый дрон по его уникальному ID/Model
+    - Автоспавн каждые 2 секунды: как только дрон взят или взорван — на площадке сразу появляется новый!
+    - Безопасный взрыв (не убивает пилота) + большой 5x3x5 Hitbox для 100% надёжного взятия дрона
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -45,6 +44,7 @@ if not dronesFolder then
     dronesFolder.Parent = workspace
 end
 
+-- Таблица соответствия: player -> droneModel
 local playerDrones = {}
 
 -- ────────────────────── ВСПОМОГАТЕЛЬНЫЕ ────────────────────
@@ -74,8 +74,6 @@ end
 
 -- ────────────────────── ВЗРЫВ (БЕЗОПАСНЫЙ ДЛЯ ПИЛОТА) ───────
 local function createExplosionFX(pos)
-    -- BlastRadius = 0 и BlastPressure = 0 гарантируют, что взрыв
-    -- воспроизводит громкий звук и вспышку, но НЕ убивает стоящего на земле игрока!
     local exp = Instance.new("Explosion")
     exp.Position = pos
     exp.BlastRadius = 0
@@ -124,7 +122,7 @@ local function createExplosionFX(pos)
 end
 
 local function destroyDrone(drone, pos)
-    if not drone then return end
+    if not drone or not drone.Parent then return end
 
     local explodePos = pos
     if not explodePos and drone.PrimaryPart then
@@ -134,6 +132,7 @@ local function destroyDrone(drone, pos)
 
     createExplosionFX(explodePos)
 
+    -- Очищаем из списка
     for plr, d in pairs(playerDrones) do
         if d == drone then
             playerDrones[plr] = nil
@@ -153,6 +152,7 @@ local function buildDroneAt(spawnPos)
     local model = Instance.new("Model")
     model.Name = "FPV_Drone_" .. droneCounter
 
+    model:SetAttribute("DroneId", droneCounter)
     model:SetAttribute("IsPiloted", false)
     model:SetAttribute("PilotUserId", 0)
 
@@ -162,7 +162,7 @@ local function buildDroneAt(spawnPos)
     local body = makePart(model, "Body",
         Vector3.new(2.2, 0.25, 2.2), baseCF,
         "Dark stone grey", Enum.Material.DiamondPlate, true)
-    body.Anchored = true  -- надежно стоит на площадке
+    body.Anchored = true
     model.PrimaryPart = body
 
     -- 2. Верхняя пластина
@@ -189,7 +189,6 @@ local function buildDroneAt(spawnPos)
 
     for i, cfg in ipairs(armConfigs) do
         local uDir = cfg.dir.Unit
-        -- Луч
         local armCF = baseCF * CFrame.new(uDir * 0.9) * CFrame.Angles(0, math.rad(cfg.angle), 0)
         local arm = makePart(model, "Arm" .. i,
             Vector3.new(0.2, 0.12, 1.6), armCF,
@@ -197,7 +196,6 @@ local function buildDroneAt(spawnPos)
         arm.Massless = true
         weld(body, arm)
 
-        -- Мотор
         local mCF = baseCF * CFrame.new(uDir * 1.55) * CFrame.Angles(0, 0, math.rad(90))
         local motor = makePart(model, "Motor" .. i,
             Vector3.new(0.42, 0.25, 0.42), mCF,
@@ -205,7 +203,6 @@ local function buildDroneAt(spawnPos)
         motor.Massless = true
         weld(body, motor)
 
-        -- Пропеллер
         local pCF = baseCF * CFrame.new(uDir * 1.55 + Vector3.new(0, 0.18, 0)) * CFrame.Angles(0, 0, math.rad(90))
         local prop = makePart(model, "Prop" .. i,
             Vector3.new(0.04, 1.5, 1.5), pCF,
@@ -214,7 +211,6 @@ local function buildDroneAt(spawnPos)
         prop.Massless = true
         weld(body, prop)
 
-        -- Колпачок
         local capCF = baseCF * CFrame.new(uDir * 1.55 + Vector3.new(0, 0.16, 0)) * CFrame.Angles(0, 0, math.rad(90))
         local cap = makePart(model, "Cap" .. i,
             Vector3.new(0.3, 0.12, 0.3), capCF,
@@ -222,7 +218,6 @@ local function buildDroneAt(spawnPos)
         cap.Massless = true
         weld(body, cap)
 
-        -- Пропвош
         local pe = Instance.new("ParticleEmitter")
         pe.Name = "Wash"
         pe.Color = ColorSequence.new(Color3.fromRGB(220, 240, 255), Color3.fromRGB(180, 210, 240))
@@ -332,12 +327,13 @@ local function buildDroneAt(spawnPos)
     hl.Enabled = true
     hl.Parent = model
 
-    -- 11. ФУНКЦИЯ ЗАХВАТА ДРОНА (Мгновенно)
+    -- 11. ФУНКЦИЯ ЗАХВАТА ДРОНА
     local function claimDrone(player)
         if model:GetAttribute("IsPiloted") == true then return end
         model:SetAttribute("IsPiloted", true)
         model:SetAttribute("PilotUserId", player.UserId)
 
+        -- Если у игрока был старый дрон в воздухе — удаляем старый дрон
         if playerDrones[player] and playerDrones[player] ~= model then
             destroyDrone(playerDrones[player])
         end
@@ -345,7 +341,7 @@ local function buildDroneAt(spawnPos)
 
         hl.Enabled = false
 
-        -- Отключаем клики и промпты
+        -- Отключаем клики и промпты на взятом дроне
         local hb = model:FindFirstChild("Hitbox")
         if hb then
             local p = hb:FindFirstChildOfClass("ProximityPrompt")
@@ -353,6 +349,8 @@ local function buildDroneAt(spawnPos)
             local c = hb:FindFirstChildOfClass("ClickDetector")
             if c then c.MaxActivationDistance = 0 end
         end
+        local bc = body:FindFirstChildOfClass("ClickDetector")
+        if bc then bc.MaxActivationDistance = 0 end
 
         -- Включаем физику и передаем Network Ownership клиенту
         body.Anchored = false
@@ -364,39 +362,35 @@ local function buildDroneAt(spawnPos)
 
         -- Уведомляем клиента
         mountRemote:FireClient(player, model)
-        print(string.format("[DroneServer] %s мгновенно взял дрон %s", player.Name, model.Name))
+        print(string.format("[DroneServer] %s взял дрон %s (ID %d)", player.Name, model.Name, droneCounter))
     end
 
-    -- 12. БОЛЬШОЙ НЕВИДИМЫЙ HITBOX ДЛЯ 100% УДОБНОГО ВЗЯТИЯ
-    -- Охватывает весь дрон (4.5 x 2.5 x 4.5 studs)
+    -- 12. БОЛЬШОЙ ХИТБОКС (5 x 3 x 5 studs) ДЛЯ 100% ВЗЯТИЯ
     local hitbox = makePart(model, "Hitbox",
-        Vector3.new(4.5, 2.5, 4.5), baseCF * CFrame.new(0, 0.5, 0),
+        Vector3.new(5, 3, 5), baseCF * CFrame.new(0, 0.5, 0),
         "Really black", Enum.Material.SmoothPlastic, false, nil, 1)
     hitbox.Massless = true
     hitbox.CanQuery = true
     hitbox.CanTouch = true
     weld(body, hitbox)
 
-    -- ClickDetector на Hitbox (нажимается в ЛЮБУЮ точку дрона!)
     local click = Instance.new("ClickDetector")
     click.Name = "DroneClick"
-    click.MaxActivationDistance = 35
+    click.MaxActivationDistance = 40
     click.Parent = hitbox
     click.MouseClick:Connect(claimDrone)
 
-    -- ClickDetector на Body (дополнительно)
     local bodyClick = Instance.new("ClickDetector")
     bodyClick.Name = "BodyClick"
-    bodyClick.MaxActivationDistance = 35
+    bodyClick.MaxActivationDistance = 40
     bodyClick.Parent = body
     bodyClick.MouseClick:Connect(claimDrone)
 
-    -- Мгновенный ProximityPrompt (0 сек удержания)
     local prompt = Instance.new("ProximityPrompt")
     prompt.ActionText = "Взлететь"
     prompt.ObjectText = "FPV Дрон"
     prompt.HoldDuration = 0
-    prompt.MaxActivationDistance = 18
+    prompt.MaxActivationDistance = 22
     prompt.KeyboardKeyCode = Enum.KeyCode.E
     prompt.RequiresLineOfSight = false
     prompt.Parent = hitbox
@@ -410,7 +404,8 @@ end
 
 -- 💥 РУЧНАЯ ДЕТОНАЦИЯ
 selfDestructRemote.OnServerEvent:Connect(function(player, clientDrone)
-    local target = playerDrones[player] or clientDrone
+    -- ВАЖНО: сначала смотрим clientDrone, если он передан и валиден
+    local target = (clientDrone and clientDrone.Parent and clientDrone) or playerDrones[player]
     if target and target.Parent then
         destroyDrone(target)
     end
@@ -418,7 +413,7 @@ end)
 
 -- ВЗРЫВ ПРИ СТОЛКНОВЕНИИ
 explodeRemote.OnServerEvent:Connect(function(player, clientDrone, pos)
-    local target = playerDrones[player] or clientDrone
+    local target = (clientDrone and clientDrone.Parent and clientDrone) or playerDrones[player]
     if target and target.Parent then
         destroyDrone(target, pos)
     end
@@ -426,15 +421,17 @@ end)
 
 -- ВЫХОД ИЗ ДРОНА
 unmountRemote.OnServerEvent:Connect(function(player, clientDrone)
-    local target = playerDrones[player] or clientDrone
-    playerDrones[player] = nil
+    local target = (clientDrone and clientDrone.Parent and clientDrone) or playerDrones[player]
+    if target and playerDrones[player] == target then
+        playerDrones[player] = nil
+    end
     if target and target.Parent then
         target:SetAttribute("IsPiloted", false)
         target:SetAttribute("PilotUserId", 0)
         pcall(function()
             target.PrimaryPart:SetNetworkOwnershipAuto()
         end)
-        task.delay(3, function()
+        task.delay(4, function()
             if target and target.Parent and target:GetAttribute("IsPiloted") == false then
                 destroyDrone(target)
             end
@@ -451,13 +448,14 @@ Players.PlayerRemoving:Connect(function(player)
     end
 end)
 
--- ────────────────────── АВТОСПАВНЕР (КАЖДЫЕ 3 СЕК) ──────────
+-- ────────────────────── АВТОСПАВНЕР (КАЖДЫЕ 2 СЕК) ──────────
 task.spawn(function()
     while true do
         local padFree = true
         for _, d in ipairs(dronesFolder:GetChildren()) do
-            if d:IsA("Model") and d.PrimaryPart then
+            if d:IsA("Model") and d.PrimaryPart and d.PrimaryPart.Parent then
                 local dist = (d.PrimaryPart.Position - Config.DRONE_SPAWN).Magnitude
+                -- Если на площадке уже стоит свободный дрон — новый не нужен
                 if dist < 6 and d:GetAttribute("IsPiloted") == false then
                     padFree = false
                     break
@@ -467,7 +465,7 @@ task.spawn(function()
 
         if padFree then
             buildDroneAt(Config.DRONE_SPAWN)
-            print("[DroneServer] Новый дрон готов на площадке")
+            print("[DroneServer] Новый дрон заспавнен на площадке")
         end
 
         task.wait(Config.RESPAWN_INTERVAL)
@@ -490,4 +488,4 @@ RunService.Heartbeat:Connect(function()
     end
 end)
 
-print("[DroneServer] Сервер дронов v7 активен!")
+print("[DroneServer] Сервер дронов v8 активен!")

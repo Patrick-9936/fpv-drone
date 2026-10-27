@@ -1,19 +1,15 @@
 --[[
-    DroneClient v7
-    - ИСПРАВЛЕН ВЗРЫВ ПРИ СТАРТЕ:
-      * 3 секунды бессмертия при взлёте (Takeoff Grace Period)
-      * Касание посадочной площадки (LandingPad) НИКОГДА не вызывает взрыв
-      * Порог скорости для взрыва поднят до 28 стад/с (только реальные удары о препятствия)
-    - ИСПРАВЛЕНО УПРАВЛЕНИЕ (полностью неинвертированное):
-      * Стик вверх / W = нос вниз, полёт ВПЕРЁД
-      * Стик вниз / S = нос вверх, полёт НАЗАД
-      * Стик вправо / D = крен вправо, полёт ВПРАВО
-      * Стик влево / A = крен влево, полёт ВЛЕВО
-      * Левый стик влево/вправо / Q/E = разворот курса 360°
-      * Левый стик вверх / Space = ГАЗ (набор высоты)
-      * Левый стик вниз / Shift = СНИЖЕНИЕ
-      * Центр стика = стабильное парение (hover)
-    - Кнопка "💥 ПОДРЫВ" и клавиши R / X мгновенно взрывают дрон по желанию
+    DroneClient v8 — Ultra-Smooth & Stable FPV Drone
+    - ИСПРАВЛЕНА ФИЗИКА (полная стабилизация высоты):
+      * При наклоне вперёд дрон НЕ падает на землю, а ровно летит вперёд!
+      * Газ не улетает в космос: плавный управляемый подъем (до 32 стад/с)
+      * Центр стика = идеальное зависание на месте (Altitude Hold)
+      * Скорость ограничена до комфортных 75 стад/с
+    - ИСПРАВЛЕНЫ ВЗРЫВЫ:
+      * Дрон НЕ взрывается при касании земли, травы или посадочной площадки
+      * Взрыв происходит ТОЛЬКО при сильном лобовом ударе о стены/башни (> 45 стад/с)
+        или по кнопке "💥 ПОДРЫВ"
+    - Полный сброс ввода при каждом взятии дрона (никаких остаточных нажатий)
 ]]
 
 local Players           = game:GetService("Players")
@@ -43,14 +39,14 @@ local windSound   = nil
 
 -- Ориентация
 local currentYaw   = 0   -- курс (Y)
-local currentPitch = 0   -- тангаж: >0 = нос вниз (вперёд)
-local currentRoll  = 0   -- крен: >0 = наклон вправо
+local currentPitch = 0   -- тангаж (>0 = нос опущен, полёт вперёд)
+local currentRoll  = 0   -- крен (>0 = крен вправо)
 
--- Ввод
-local pitchIn    = 0     -- +1 = вперед (W), -1 = назад (S)
+-- Оси ввода
+local pitchIn    = 0     -- +1 = вперёд (W), -1 = назад (S)
 local rollIn     = 0     -- +1 = вправо (D), -1 = влево (A)
 local yawIn      = 0     -- +1 = вправо (E), -1 = влево (Q)
-local throttleIn = 0.5   -- 0.5 = hover, 1.0 = газ, 0.0 = спуск
+local throttleIn = 0.5   -- 0.5 = hover, 1.0 = подъем, 0.0 = спуск
 
 local keysDown   = {}
 local isMobile   = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
@@ -83,7 +79,7 @@ local function createHUD()
     hudGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
     hudGui.Parent = player:WaitForChild("PlayerGui")
 
-    -- Вспышка
+    -- Вспышка детонации
     flashFrame = Instance.new("Frame")
     flashFrame.Name = "Flash"
     flashFrame.Size = UDim2.new(1, 0, 1, 0)
@@ -160,7 +156,7 @@ local function createHUD()
     makeLabel("Speed", 8)
     makeLabel("Alt", 30)
     makeLabel("Thr", 52)
-    makeLabel("Bat", 74)
+    makeLabel("Mode", 74)
 
     -- REC индикатор
     local topR = Instance.new("TextLabel")
@@ -171,7 +167,7 @@ local function createHUD()
     topR.TextColor3 = Color3.fromRGB(255, 60, 60)
     topR.Font = Enum.Font.Code
     topR.TextSize = 15
-    topR.Text = "● REC  4S 15.6V"
+    topR.Text = "● REC  FPV STAB"
     topR.Parent = hudGui
 
     -- Предупреждение границы
@@ -214,9 +210,7 @@ local function createHUD()
     boomBtn.Parent = topControls
     Instance.new("UICorner", boomBtn).CornerRadius = UDim.new(0, 8)
     boomBtn.MouseButton1Click:Connect(function()
-        if mounted then
-            manualDetonate()
-        end
+        if mounted then manualDetonate() end
     end)
 
     -- 🚪 ВЫХОД
@@ -234,12 +228,9 @@ local function createHUD()
     exitBtn.Parent = topControls
     Instance.new("UICorner", exitBtn).CornerRadius = UDim.new(0, 8)
     exitBtn.MouseButton1Click:Connect(function()
-        if mounted then
-            unmountDrone()
-        end
+        if mounted then unmountDrone() end
     end)
 
-    -- Подсказка ПК
     if not isMobile then
         local hint = Instance.new("TextLabel")
         hint.Size = UDim2.new(0, 530, 0, 34)
@@ -275,8 +266,8 @@ local function updateHUD()
     local tLbl = panel:FindFirstChild("Thr")
     if tLbl then tLbl.Text = string.format("THR  %d %%", thrPct) end
 
-    local bLbl = panel:FindFirstChild("Bat")
-    if bLbl then bLbl.Text = "BAT  4S 98%" end
+    local mLbl = panel:FindFirstChild("Mode")
+    if mLbl then mLbl.Text = "MODE [HOLD]" end
 
     if horizonBar then
         horizonBar.Rotation = math.deg(-currentRoll)
@@ -343,6 +334,20 @@ local function createMobileUI()
     rightThumb = rThumb
 end
 
+-- Сброс сенсорных пальцев
+local function clearAllTouches()
+    leftTouchId = nil
+    rightTouchId = nil
+    leftJoyCenter = nil
+    rightJoyCenter = nil
+    pitchIn = 0
+    rollIn = 0
+    yawIn = 0
+    throttleIn = 0.5
+    if leftThumb then leftThumb.Position = UDim2.new(0.5, 0, 0.5, 0) end
+    if rightThumb then rightThumb.Position = UDim2.new(0.5, 0, 0.5, 0) end
+end
+
 if isMobile then
     UserInputService.InputBegan:Connect(function(input, gp)
         if gp or not mounted then return end
@@ -374,6 +379,7 @@ if isMobile then
             local rawY = (math.abs(norm.Y) > dz) and norm.Y or 0
 
             yawIn = rawX * math.abs(rawX)
+            -- Мягкий газ: 0.5 = hover, вверх до 1.0, вниз до 0.0
             throttleIn = math.clamp(0.5 - (rawY * 0.5), 0, 1)
 
             if leftThumb then
@@ -390,7 +396,7 @@ if isMobile then
             local rawY = (math.abs(norm.Y) > dz) and norm.Y or 0
 
             rollIn  = rawX * math.abs(rawX)
-            pitchIn = -rawY * math.abs(rawY) -- палец вверх = нос вниз (полёт ВПЕРЁД)
+            pitchIn = -rawY * math.abs(rawY) -- палец вверх = полёт ВПЕРЁД
 
             if rightThumb then
                 rightThumb.Position = UDim2.new(0.5 + norm.X * 0.4, 0, 0.5 + norm.Y * 0.4, 0)
@@ -452,9 +458,9 @@ local function readKeyboard()
     if keysDown[Enum.KeyCode.Q] then yawIn   = -1 end
 
     if keysDown[Enum.KeyCode.Space] then
-        throttleIn = math.min(throttleIn + 0.04, 1)
+        throttleIn = math.min(throttleIn + 0.03, 1)
     elseif keysDown[Enum.KeyCode.LeftShift] then
-        throttleIn = math.max(throttleIn - 0.04, 0)
+        throttleIn = math.max(throttleIn - 0.03, 0)
     else
         if throttleIn > 0.52 then
             throttleIn = throttleIn - 0.015
@@ -497,9 +503,11 @@ function mountDrone(drone)
     bodyGyro   = droneBody:FindFirstChild("DroneGyro")
     motorSound = droneBody:FindFirstChild("MotorSound")
 
+    -- Полный сброс всех осей ввода
+    clearAllTouches()
+
     mounted = true
     collisionLock = false
-    -- 3 секунды бессмертия при взлёте!
     takeoffGraceUntil = tick() + Config.TAKEOFF_GRACE_TIME
 
     local _, ry, _ = droneBody.CFrame:ToOrientation()
@@ -507,6 +515,12 @@ function mountDrone(drone)
     currentPitch = 0
     currentRoll  = 0
     throttleIn   = 0.5
+
+    -- Сбрасываем скорость дрона при старте чтобы он плавно взлетал
+    pcall(function()
+        droneBody.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        droneBody.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+    end)
 
     camera.CameraType = Enum.CameraType.Scriptable
 
@@ -527,21 +541,26 @@ function mountDrone(drone)
     if mobileGui then mobileGui.Enabled = true end
     if warningLabel then warningLabel.Visible = false end
 
-    -- Клиентский детектор столкновения
+    -- Детектор столкновения
     droneBody.Touched:Connect(function(hit)
         if not mounted or collisionLock then return end
 
-        -- 1. Защита при взлёте (первые 3 секунды)
+        -- 5 секунд защиты при взлёте
         if tick() < takeoffGraceUntil then return end
 
-        -- 2. Защита от собственных деталей и персонажа
         if hit:IsDescendantOf(droneModel) then return end
         if hit.Parent and hit.Parent:FindFirstChildOfClass("Humanoid") then return end
 
-        -- 3. Защита посадочной площадки (касание площадки никогда не взрывает дрон!)
-        if hit.Name:find("Pad") or (hit.Parent and hit.Parent.Name:find("Pad")) then return end
+        -- Земля, трава и площадка НИКОГДА не взрывают дрон (позволяет мягко садиться/скользить!)
+        local hName = hit.Name:lower()
+        if hName:find("ground") or hName:find("pad") or hName:find("grass") or hName:find("floor") then
+            return
+        end
+        if hit.Parent and hit.Parent.Name:lower():find("pad") then
+            return
+        end
 
-        -- 4. Проверка скорости удара (только от 28 стад/с)
+        -- Взрыв ТОЛЬКО при реальном лобовом ударе о стены/башни/препятствия на высокой скорости
         local spd = droneBody.AssemblyLinearVelocity.Magnitude
         if spd >= Config.MIN_COLLISION_SPEED then
             collisionLock = true
@@ -553,6 +572,8 @@ end
 function unmountDrone()
     if not mounted then return end
     mounted = false
+
+    clearAllTouches()
 
     if motorSound then motorSound:Stop() end
     if windSound  then windSound:Stop()  end
@@ -576,6 +597,8 @@ function manualDetonate()
     if not mounted then return end
     mounted = false
 
+    clearAllTouches()
+
     if motorSound then motorSound:Stop() end
     if windSound  then windSound:Stop()  end
     setPropWash(false)
@@ -595,10 +618,6 @@ function manualDetonate()
     droneBody  = nil
     bodyGyro   = nil
 
-    if targetDrone then
-        pcall(function() targetDrone:Destroy() end)
-    end
-
     selfDestructRemote:FireServer(targetDrone)
 end
 
@@ -606,6 +625,8 @@ end
 function crashExplode()
     if not mounted then return end
     mounted = false
+
+    clearAllTouches()
 
     local pos = droneBody and droneBody.Position
 
@@ -628,14 +649,10 @@ function crashExplode()
     droneBody  = nil
     bodyGyro   = nil
 
-    if targetDrone then
-        pcall(function() targetDrone:Destroy() end)
-    end
-
     explodeRemote:FireServer(targetDrone, pos)
 end
 
--- ────────────────────── ФИЗИЧЕСКИЙ ЦИКЛ ПОЛЁТА ─────────────
+-- ────────────────────── СТАБИЛЬНЫЙ ФИЗИЧЕСКИЙ ЦИКЛ ──────────
 local CAM_TILT_RAD = math.rad(Config.CAM_TILT)
 
 RunService.RenderStepped:Connect(function(dt)
@@ -645,10 +662,10 @@ RunService.RenderStepped:Connect(function(dt)
         readKeyboard()
     end
 
-    -- Рыскание (поворот курса 360°)
+    -- 1. Рыскание (поворот курса 360°)
     currentYaw = currentYaw - (yawIn * Config.YAW_SPEED * dt)
 
-    -- Тангаж и Крен
+    -- 2. Тангаж и Крен (плавный отклик)
     local maxTiltRad = math.rad(Config.MAX_TILT_DEG)
     local desiredPitch = pitchIn * maxTiltRad
     local desiredRoll  = rollIn  * maxTiltRad
@@ -657,52 +674,67 @@ RunService.RenderStepped:Connect(function(dt)
     currentPitch = currentPitch + (desiredPitch - currentPitch) * lerpK
     currentRoll  = currentRoll  + (desiredRoll  - currentRoll)  * lerpK
 
-    -- Неинвертированное управление:
-    -- pitchIn > 0 => нос опускается, полёт ВПЕРЁД!
-    -- rollIn > 0 => наклон вправо, полёт ВПРАВО!
     local targetCF = CFrame.Angles(0, currentYaw, 0)
         * CFrame.Angles(-currentPitch, 0, 0)
         * CFrame.Angles(0, 0, -currentRoll)
 
     bodyGyro.CFrame = targetCF
 
-    -- Тяга перпендикулярно корпусу дрона (UpVector)
+    -- 3. ПОЛНАЯ СТАБИЛИЗАЦИЯ ВЫСОТЫ И СКОРОСТИ (Altitude Hold + Velocity Director)
     local currentVel = droneBody.AssemblyLinearVelocity
-    local gravity = workspace.Gravity
 
-    local hoverAccel = gravity
-    local maxAccel   = gravity * Config.MAX_THRUST_MULT
-
-    local thrustMag = 0
-    if throttleIn >= 0.5 then
-        thrustMag = hoverAccel + (throttleIn - 0.5) * 2 * (maxAccel - hoverAccel)
+    -- Вертикальная скорость:
+    -- throttle = 0.5 => targetVy = 0 (стабильное парение на высоте, дрон НЕ падает!)
+    -- throttle > 0.5 => плавный подъем до +32 стад/с
+    -- throttle < 0.5 => плавный спуск до -24 стад/с
+    local targetVy = 0
+    if throttleIn > 0.54 then
+        targetVy = (throttleIn - 0.5) * 2 * Config.MAX_CLIMB_SPEED
+    elseif throttleIn < 0.46 then
+        targetVy = (throttleIn - 0.5) * 2 * Config.MAX_FALL_SPEED
     else
-        thrustMag = throttleIn * 2 * hoverAccel
+        targetVy = 0
     end
 
-    local thrustVector = targetCF.UpVector * thrustMag
-    local gravityVector = Vector3.new(0, -gravity, 0)
-    local dragVector = -currentVel * Config.HORIZONTAL_DRAG
+    -- Горизонтальная скорость:
+    -- Наклон носа вниз (currentPitch > 0) плавно направляет дрон ВПЕРЁД
+    -- Крен вправо (currentRoll > 0) плавно направляет дрон ВПРАВО
+    local lookFlat = Vector3.new(targetCF.LookVector.X, 0, targetCF.LookVector.Z)
+    if lookFlat.Magnitude > 0.01 then lookFlat = lookFlat.Unit else lookFlat = Vector3.new(0, 0, -1) end
 
-    local newVel = currentVel + (thrustVector + gravityVector + dragVector) * dt
-    droneBody.AssemblyLinearVelocity = newVel
+    local rightFlat = Vector3.new(targetCF.RightVector.X, 0, targetCF.RightVector.Z)
+    if rightFlat.Magnitude > 0.01 then rightFlat = rightFlat.Unit else rightFlat = Vector3.new(1, 0, 0) end
 
-    -- Звуки
+    local forwardRatio = currentPitch / maxTiltRad
+    local rightRatio   = currentRoll  / maxTiltRad
+
+    local targetHVel = (lookFlat * forwardRatio * Config.MAX_SPEED)
+                     + (rightFlat * rightRatio * Config.MAX_SPEED)
+
+    -- Плавная интерполяция к целевой скорости (без рывков и без падений)
+    local lerpVy = currentVel.Y + (targetVy - currentVel.Y) * math.clamp(7 * dt, 0, 1)
+    local lerpVx = currentVel.X + (targetHVel.X - currentVel.X) * math.clamp(5 * dt, 0, 1)
+    local lerpVz = currentVel.Z + (targetHVel.Z - currentVel.Z) * math.clamp(5 * dt, 0, 1)
+
+    droneBody.AssemblyLinearVelocity = Vector3.new(lerpVx, lerpVy, lerpVz)
+
+    -- 4. Звуки
     if motorSound then
-        motorSound.PlaybackSpeed = 0.75 + (throttleIn * 0.8)
-        motorSound.Volume = 0.35 + (throttleIn * 0.45)
+        local spdRatio = math.clamp(droneBody.AssemblyLinearVelocity.Magnitude / Config.MAX_SPEED, 0, 1)
+        motorSound.PlaybackSpeed = 0.85 + (throttleIn * 0.4) + (spdRatio * 0.3)
+        motorSound.Volume = 0.4 + (throttleIn * 0.3)
     end
     if windSound then
-        local spd = newVel.Magnitude
-        windSound.Volume = math.clamp(spd / Config.MAX_SPEED * 0.8, 0, 0.8)
+        local spd = droneBody.AssemblyLinearVelocity.Magnitude
+        windSound.Volume = math.clamp(spd / Config.MAX_SPEED * 0.7, 0, 0.7)
     end
 
-    -- Камера FPV
+    -- 5. Камера FPV
     camera.CFrame = droneBody.CFrame
         * CFrame.new(0, 0.35, -1.3)
         * CFrame.Angles(-CAM_TILT_RAD, 0, 0)
 
-    -- Границы
+    -- 6. Границы
     local dPos = droneBody.Position
     local hDist = Vector2.new(dPos.X, dPos.Z).Magnitude
     local isOut = (hDist > Config.BOUNDS_RADIUS)

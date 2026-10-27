@@ -4,22 +4,23 @@ local DroneConfig = {}
 DroneConfig.DRONE_SPAWN = Vector3.new(25, 1.8, 0)
 
 -- ── АВТОСПАВН ──
-DroneConfig.RESPAWN_INTERVAL = 3    -- каждые 3 секунды проверяем площадку
+DroneConfig.RESPAWN_INTERVAL = 2    -- каждые 2 секунды проверяем площадку
 
 -- ── ФИЗИКА ПОЛЁТА ──
-DroneConfig.MAX_TILT_DEG    = 42    -- максимальный наклон тангажа и крена (градусы)
-DroneConfig.TILT_LERP_SPEED = 10.0  -- быстрый отзывчивый отклик на стики
-DroneConfig.YAW_SPEED       = 3.4   -- скорость поворота курса (рад/с)
-DroneConfig.MAX_THRUST_MULT = 3.0   -- ускорение при 100% газе (3× веса)
-DroneConfig.HORIZONTAL_DRAG = 0.9   -- сопротивление воздуха (реалистичный накат)
-DroneConfig.MAX_SPEED       = 110   -- макс скорость для HUD (стад/с)
+DroneConfig.MAX_TILT_DEG    = 38    -- комфортный угол наклона (градусы)
+DroneConfig.TILT_LERP_SPEED = 8.5   -- плавный, стабильный отклик на стики
+DroneConfig.YAW_SPEED       = 3.0   -- скорость поворота курса (рад/с)
+DroneConfig.MAX_CLIMB_SPEED = 32    -- макс вертикальная скорость подъема (стад/с)
+DroneConfig.MAX_FALL_SPEED  = 24    -- макс вертикальная скорость спуска (стад/с)
+DroneConfig.MAX_SPEED       = 75    -- макс горизонтальная скорость (стад/с)
+DroneConfig.HORIZONTAL_DRAG = 1.2   -- стабильное сопротивление воздуха (дрон не улетает неуправляемо)
 
 -- ── КАМЕРА ──
-DroneConfig.CAM_TILT = 18           -- наклон FPV камеры вверх (градусы)
+DroneConfig.CAM_TILT = 16           -- угол наклона FPV камеры вверх
 
 -- ── СТОЛКНОВЕНИЯ И ВЗРЫВЫ ──
-DroneConfig.MIN_COLLISION_SPEED = 28 -- взрыв ТОЛЬКО при сильном ударе (от 28 стад/с)
-DroneConfig.TAKEOFF_GRACE_TIME  = 3.0 -- 3 секунды бессмертия при взлёте (чтобы не взрывался на площадке!)
+DroneConfig.MIN_COLLISION_SPEED = 45 -- взрыв ТОЛЬКО при сильном ударе о стену (от 45 стад/с)
+DroneConfig.TAKEOFF_GRACE_TIME  = 5.0 -- 5 секунд защиты при взлёте
 
 -- ── ГРАНИЦЫ КАРТЫ ──
 DroneConfig.BOUNDS_RADIUS      = 400
