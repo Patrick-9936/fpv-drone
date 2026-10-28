@@ -1,5 +1,5 @@
 --[[
-    DroneServer v10 — серверная (детерминированная) модель полёта.
+    DroneServer v11 — серверная (детерминированная) модель полёта.
 
     Почему переписано:
       * В v8 полёт держался на «перезаписи скорости» клиентом: AssemblyLinearVelocity
@@ -96,6 +96,30 @@ local function makePart(parent, name, size, cf, color, mat, canCollide, shape, t
     if transp then p.Transparency = transp end
     p.Parent = parent
     return p
+end
+
+-- Персонаж не должен бегать по карте, пока игрок в FPV — иначе он уезжает
+-- с площадки и после выхода оказывается невесть где.
+local function freezeCharacter(player, frozen)
+    local char = player.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not hum then return end
+
+    if frozen then
+        if hum:GetAttribute("DroneFrozen") then return end
+        hum:SetAttribute("DronePrevWalkSpeed", hum.WalkSpeed)
+        hum:SetAttribute("DronePrevJumpPower", hum.JumpPower)
+        hum:SetAttribute("DroneFrozen", true)
+        hum.WalkSpeed = 0
+        pcall(function() hum.JumpPower = 0 end)
+        pcall(function() hum.JumpHeight = 0 end)
+    else
+        if not hum:GetAttribute("DroneFrozen") then return end
+        hum.WalkSpeed = hum:GetAttribute("DronePrevWalkSpeed") or 16
+        pcall(function() hum.JumpPower = hum:GetAttribute("DronePrevJumpPower") or 50 end)
+        pcall(function() hum.JumpHeight = 7.2 end)
+        hum:SetAttribute("DroneFrozen", false)
+    end
 end
 
 local function buildFilter()
@@ -400,8 +424,11 @@ end
 
 local function removeDrone(rec)
     drones[rec.model] = nil
-    if rec.pilot and playerDrones[rec.pilot] == rec then
-        playerDrones[rec.pilot] = nil
+    if rec.pilot then
+        if playerDrones[rec.pilot] == rec then
+            playerDrones[rec.pilot] = nil
+        end
+        freezeCharacter(rec.pilot, false)
     end
     pcall(function()
         rec.model:Destroy()
@@ -421,6 +448,7 @@ local function loseDrone(rec, reason)
     if pilot then
         playerDrones[pilot] = nil            -- пилот сразу свободен и может взять новый
         rec.pilot = nil
+        freezeCharacter(pilot, false)
         lostRemote:FireClient(pilot, reason or "crash")
     end
     removeDrone(rec)
@@ -433,6 +461,7 @@ local function parkDrone(rec)
         if playerDrones[rec.pilot] == rec then
             playerDrones[rec.pilot] = nil
         end
+        freezeCharacter(rec.pilot, false)
         rec.pilot = nil
     end
     rec.mode = "parking"
@@ -446,13 +475,12 @@ end
 claimDrone = function(rec, player)
     if not rec or not drones[rec.model] or rec.mode ~= "idle" then return end
 
-    -- Один дрон на игрока, но устаревшую запись (дрон уже удалён/не летает)
-    -- чистим, иначе игрок навсегда остаётся «занятым» и новые дроны не берутся
+    -- Один дрон на игрока. Если запись есть, но игрок жмёт на ДРУГОЙ дрон, значит
+    -- он уже не в FPV — старый дрон просто паркуем, иначе игрок навсегда «занят»
     local existing = playerDrones[player]
     if existing then
         if existing == rec then return end
-        if drones[existing.model] and existing.mode == "piloted" then return end
-        playerDrones[player] = nil
+        parkDrone(existing)
     end
 
     rec.mode  = "piloted"
@@ -466,6 +494,7 @@ claimDrone = function(rec, player)
     rec.inputAt = os.clock()
 
     setPickupEnabled(rec, false)
+    freezeCharacter(player, true)
 
     if rec.beepSnd then rec.beepSnd:Play() end
 
@@ -492,27 +521,40 @@ local function movePiloted(rec, dt, params)
         return
     end
 
-    -- Стены: луч по направлению движения на длину шага + радиус корпуса
+    -- Стены: три луча по высоте (центр, низ, верх), чтобы не проскочить
+    -- низкий бортик и не провалиться в щель
     local dx, dz = s.x - oldX, s.z - oldZ
     local flatDist = math.sqrt(dx * dx + dz * dz)
     if flatDist > 1e-5 then
         local ux, uz = dx / flatDist, dz / flatDist
-        local origin = Vector3.new(oldX, s.y, oldZ)
         local reach  = flatDist + Config.BODY_RADIUS
-        local hit = workspace:Raycast(origin, Vector3.new(ux * reach, 0, uz * reach), params)
+        local hit = nil
 
-        if hit and math.abs(hit.Normal.Y) <= 0.6 then          -- именно стена, а не пол/потолок
-            local impactSpeed = FlightModel.horizontalSpeed(s)
-            if impactSpeed >= Config.CRASH_SPEED then
+        for _, dy in ipairs({ 0, -0.6, 0.6 }) do
+            local origin = Vector3.new(oldX, s.y + dy, oldZ)
+            local h = workspace:Raycast(origin, Vector3.new(ux * reach, 0, uz * reach), params)
+            if h and math.abs(h.Normal.Y) <= 0.6 then
+                if not hit or h.Distance < hit.Distance then hit = h end
+            end
+        end
+
+        if hit then
+            local n = hit.Normal
+            -- в стену летим = только нормальная составляющая; скольжение вдоль
+            -- стены на полной скорости не должно взрывать
+            local intoWall = -(s.vx * n.X + s.vz * n.Z)
+
+            if intoWall >= Config.CRASH_SPEED then
                 s.x, s.z = hit.Position.X, hit.Position.Z
                 loseDrone(rec, "crash")
                 return
             end
+
             -- медленное касание: отодвигаем от стены и скользим вдоль неё
             local back = math.max(hit.Distance - Config.BODY_RADIUS, 0)
             s.x = oldX + ux * back
             s.z = oldZ + uz * back
-            FlightModel.cancelAlongNormal(s, hit.Normal.X, hit.Normal.Z)
+            FlightModel.cancelAlongNormal(s, n.X, n.Z)
         end
     end
 
@@ -584,6 +626,16 @@ unmountRemote.OnServerEvent:Connect(function(player)
     if rec then parkDrone(rec) end
 end)
 
+-- Персонаж переродился (упал/умер), пока летал: освобождаем дрон
+local function hookCharacter(player)
+    player.CharacterAdded:Connect(function()
+        local rec = playerDrones[player]
+        if rec then parkDrone(rec) end
+    end)
+end
+Players.PlayerAdded:Connect(hookCharacter)
+for _, p in ipairs(Players:GetPlayers()) do hookCharacter(p) end
+
 Players.PlayerRemoving:Connect(function(player)
     local rec = playerDrones[player]
     playerDrones[player] = nil
@@ -607,7 +659,16 @@ RunService.Heartbeat:Connect(function(dt)
     for _, rec in ipairs(snapshot) do
         if drones[rec.model] then
             if rec.mode == "piloted" then
-                movePiloted(rec, dt, params)
+                local pilot = rec.pilot
+                if pilot and (now - rec.inputAt) > Config.RELEASE_AFTER then
+                    -- игрок перестал управлять (свернул игру, потерял связь):
+                    -- освобождаем и дрон, и самого игрока, иначе он «занят» навсегда
+                    -- и новый дрон взять не может
+                    lostRemote:FireClient(pilot, "timeout")
+                    parkDrone(rec)
+                else
+                    movePiloted(rec, dt, params)
+                end
             elseif rec.mode == "parking" then
                 updateParking(rec, dt, params)
             elseif rec.mode == "idle" and (now - rec.idleSince) > Config.IDLE_LIFETIME then
@@ -651,4 +712,4 @@ task.spawn(function()
     end
 end)
 
-print("[DroneServer] Сервер дронов v10 активен!")
+print("[DroneServer] Сервер дронов v11 активен!")

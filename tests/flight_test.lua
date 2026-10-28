@@ -16,15 +16,15 @@ local FlightModel = require("FlightModel")
 
 -- Те же числа, что в DroneConfig
 local CFG = {
-    MAX_TILT_DEG     = 32,
-    TILT_LERP_SPEED  = 7,
-    YAW_SPEED        = 2.4,
+    MAX_TILT_DEG     = 42,
+    TILT_LERP_SPEED  = 8,
+    YAW_SPEED        = 3.2,
     MAX_CLIMB_SPEED  = 26,
     MAX_FALL_SPEED   = 50,
     VERT_ACCEL       = 8,
     HOVER_THROTTLE   = 0.62,
-    MAX_SPEED        = 70,
-    HORIZONTAL_ACCEL = 3.2,
+    MAX_SPEED        = 85,
+    HORIZONTAL_ACCEL = 4.5,
 }
 
 local DT = 1 / 60

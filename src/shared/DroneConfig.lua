@@ -13,23 +13,26 @@ DroneConfig.IDLE_LIFETIME    = 120   -- забытый ничейный дрон
 DroneConfig.PARK_FALL_SPEED  = 14    -- скорость автоспуска после выхода из дрона
 
 -- ── ФИЗИКА ПОЛЁТА ──
-DroneConfig.MAX_TILT_DEG     = 32    -- максимальный угол наклона
-DroneConfig.TILT_LERP_SPEED  = 7     -- плавность отклика на стики
-DroneConfig.YAW_SPEED        = 2.4   -- скорость поворота курса (рад/с)
+DroneConfig.MAX_TILT_DEG     = 42    -- максимальный угол наклона
+DroneConfig.TILT_LERP_SPEED  = 8     -- плавность отклика на стики
+DroneConfig.YAW_SPEED        = 3.2   -- скорость поворота курса (рад/с)
 DroneConfig.MAX_CLIMB_SPEED  = 26    -- макс. вертикальная скорость вверх (стад/с)
 DroneConfig.MAX_FALL_SPEED   = 50    -- макс. вертикальная скорость падения (стад/с)
 DroneConfig.VERT_ACCEL       = 8     -- плавность изменения высоты
 DroneConfig.HOVER_THROTTLE   = 0.62  -- единственное положение газа, где дрон висит
                                      -- (0.5 = брошенный стик = проседает, 0 = падает)
-DroneConfig.MAX_SPEED        = 70    -- макс. горизонтальная скорость (стад/с)
-DroneConfig.HORIZONTAL_ACCEL = 3.2   -- разгон/торможение по горизонтали
+DroneConfig.MAX_SPEED        = 85    -- макс. горизонтальная скорость (стад/с)
+DroneConfig.HORIZONTAL_ACCEL = 4.5   -- разгон/торможение по горизонтали
 DroneConfig.INPUT_TIMEOUT    = 0.5   -- если ввод пропал — считаем газ полностью убранным
+DroneConfig.RELEASE_AFTER    = 2.5   -- столько секунд без ввода — дрон освобождается сам
+                                     -- (иначе игрок навсегда занят и новый взять не может)
 
 -- ── КАМЕРА ──
 DroneConfig.CAM_TILT = 14            -- наклон FPV-камеры вверх (градусы)
 
 -- ── КОЛЛИЗИИ ──
-DroneConfig.CRASH_SPEED  = 55   -- взрыв только при лобовом ударе о стену на такой скорости
+DroneConfig.CRASH_SPEED  = 30   -- взрыв, если в стену влетаем на такой скорости (нормальная
+                               -- составляющая, то есть скольжение вдоль стены не считается)
 DroneConfig.BODY_RADIUS  = 1.3  -- радиус корпуса для проверки стен
 DroneConfig.GROUND_OFFSET = 1.15 -- насколько центр дрона выше поверхности при посадке
 

@@ -1,5 +1,5 @@
 --[[
-    DroneClient v10 — клиент только управляет и снимает.
+    DroneClient v11 — клиент только управляет и снимает.
 
     Что изменилось:
       * Клиент больше НЕ трогает физику (никаких BodyGyro / AssemblyLinearVelocity).
@@ -553,6 +553,10 @@ localUnmount = function(notifyServer, lostReason)
     setCharVisible(true)
     if warningLabel then warningLabel.Visible = false end
 
+    local char = player.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum and hum.WalkSpeed == 0 then hum.WalkSpeed = 16 end
+
     droneModel = nil
     droneBody  = nil
     motorSound = nil
@@ -612,6 +616,11 @@ local function mountDrone(drone)
     setPropWash(true)
     setCharVisible(false)
     setOwnModelVisible(false)   -- свой корпус в кадре не нужен
+
+    -- персонаж не должен ходить, пока мы летаем
+    local char = player.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum then hum.WalkSpeed = 0 end
 
     if hudGui    then hudGui.Enabled    = true end
     if mobileGui then mobileGui.Enabled = true end
@@ -688,6 +697,8 @@ lostRemote.OnClientEvent:Connect(function(reason)
         text = "💥 ДРОН ПОДОРВАН"
     elseif reason == "borders" then
         text = "📡 СИГНАЛ ПОТЕРЯН — ДРОН УЛЕТЕЛ ЗА КАРТУ"
+    elseif reason == "timeout" then
+        text = "📡 СВЯЗЬ С ДРОНОМ ПОТЕРЯНА"
     else
         text = "💥 ДРОН РАЗБИЛСЯ"
     end
