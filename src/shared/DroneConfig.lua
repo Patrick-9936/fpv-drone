@@ -17,11 +17,13 @@ DroneConfig.MAX_TILT_DEG     = 32    -- максимальный угол нак
 DroneConfig.TILT_LERP_SPEED  = 7     -- плавность отклика на стики
 DroneConfig.YAW_SPEED        = 2.4   -- скорость поворота курса (рад/с)
 DroneConfig.MAX_CLIMB_SPEED  = 26    -- макс. вертикальная скорость вверх (стад/с)
-DroneConfig.MAX_FALL_SPEED   = 30    -- макс. вертикальная скорость вниз (стад/с)
-DroneConfig.VERT_ACCEL       = 7     -- плавность изменения высоты
+DroneConfig.MAX_FALL_SPEED   = 50    -- макс. вертикальная скорость падения (стад/с)
+DroneConfig.VERT_ACCEL       = 8     -- плавность изменения высоты
+DroneConfig.HOVER_THROTTLE   = 0.62  -- единственное положение газа, где дрон висит
+                                     -- (0.5 = брошенный стик = проседает, 0 = падает)
 DroneConfig.MAX_SPEED        = 70    -- макс. горизонтальная скорость (стад/с)
 DroneConfig.HORIZONTAL_ACCEL = 3.2   -- разгон/торможение по горизонтали
-DroneConfig.INPUT_TIMEOUT    = 0.5   -- если ввод пропал — дрон зависает на месте
+DroneConfig.INPUT_TIMEOUT    = 0.5   -- если ввод пропал — считаем газ полностью убранным
 
 -- ── КАМЕРА ──
 DroneConfig.CAM_TILT = 14            -- наклон FPV-камеры вверх (градусы)

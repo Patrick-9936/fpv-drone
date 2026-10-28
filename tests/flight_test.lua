@@ -20,8 +20,9 @@ local CFG = {
     TILT_LERP_SPEED  = 7,
     YAW_SPEED        = 2.4,
     MAX_CLIMB_SPEED  = 26,
-    MAX_FALL_SPEED   = 30,
-    VERT_ACCEL       = 7,
+    MAX_FALL_SPEED   = 50,
+    VERT_ACCEL       = 8,
+    HOVER_THROTTLE   = 0.62,
     MAX_SPEED        = 70,
     HORIZONTAL_ACCEL = 3.2,
 }
@@ -47,16 +48,31 @@ local function run(s, seconds, input)
 end
 
 local NEUTRAL = { pitch = 0, roll = 0, yaw = 0, throttle = 0.5 }
+local HOVER   = { pitch = 0, roll = 0, yaw = 0, throttle = 0.62 }
+local FULL    = { pitch = 0, roll = 0, yaw = 0, throttle = 0 }
 
 -- ──────────────────────────────────────────────
-print("\n[1] Висение: стики в центре не должны ронять дрон")
+print("\n[1] Брошенный стик (газ 0.5) не держит высоту — дрон проседает как FPV")
 local s = FlightModel.new(CFG, 25, 6.5, 0, 0)
 local y0 = s.y
-run(s, 10, NEUTRAL)
-check("высота не изменилась за 10 секунд",
-    math.abs(s.y - y0) < 0.01, string.format("dy=%.4f", s.y - y0))
-check("нет паразитной скорости",
-    FlightModel.speed(s) < 0.01, string.format("v=%.4f", FlightModel.speed(s)))
+run(s, 5, NEUTRAL)
+check("дрон снизился, а не завис", s.y < y0 - 30, string.format("dy=%.1f", s.y - y0))
+check("снижение плавное (~9-10 стад/с)", s.vy > -14 and s.vy < -6,
+    string.format("vy=%.2f", s.vy))
+check("горизонтального сноса нет", FlightModel.horizontalSpeed(s) < 0.01,
+    string.format("v=%.3f", FlightModel.horizontalSpeed(s)))
+
+print("\n[1b] На HOVER_THROTTLE дрон всё ещё способен висеть")
+s = FlightModel.new(CFG, 0, 100, 0, 0)
+local yh = s.y
+run(s, 5, HOVER)
+check("высота держится", math.abs(s.y - yh) < 0.01, string.format("dy=%.4f", s.y - yh))
+
+print("\n[1c] Ввод пропал (газ 0) — дрон падает")
+s = FlightModel.new(CFG, 0, 100, 0, 0)
+run(s, 5, FULL)
+check("вертикальная скорость близка к -MAX_FALL_SPEED",
+    math.abs(s.vy + CFG.MAX_FALL_SPEED) < 1.5, string.format("vy=%.2f", s.vy))
 
 -- ──────────────────────────────────────────────
 print("\n[2] Газ вверх: скорость набора выходит на предел")
@@ -67,10 +83,10 @@ check("скорость ≈ MAX_CLIMB_SPEED",
     math.abs(s.vy - CFG.MAX_CLIMB_SPEED) < 0.5, string.format("vy=%.2f", s.vy))
 
 -- ──────────────────────────────────────────────
-print("\n[3] Наклон вперёд не должен ронять высоту")
+print("\n[3] Наклон вперёд на газу висения не роняет высоту")
 s = FlightModel.new(CFG, 0, 50, 0, 0)
 local yBefore = s.y
-run(s, 3, { pitch = 1, roll = 0, yaw = 0, throttle = 0.5 })
+run(s, 3, { pitch = 1, roll = 0, yaw = 0, throttle = CFG.HOVER_THROTTLE })
 check("высота та же", math.abs(s.y - yBefore) < 0.01, string.format("dy=%.4f", s.y - yBefore))
 check("летит вперёд (-Z)", s.z < -100, string.format("z=%.1f", s.z))
 check("разогнался до ~MAX_SPEED",
@@ -118,10 +134,10 @@ check("снизился примерно на 4 с * MAX_FALL_SPEED",
     string.format("спуск=%.1f, ожидали ~%.1f", 100 - s.y, expected))
 
 -- ──────────────────────────────────────────────
-print("\n[7] Крен уводит вправо и держит высоту")
+print("\n[7] Крен уводит вправо и на газу висения держит высоту")
 s = FlightModel.new(CFG, 0, 80, 0, 0)
 local yb = s.y
-run(s, 2, { pitch = 0, roll = 1, yaw = 0, throttle = 0.5 })
+run(s, 2, { pitch = 0, roll = 1, yaw = 0, throttle = CFG.HOVER_THROTTLE })
 check("сместился вправо (+X)", s.x > 50, string.format("x=%.1f", s.x))
 check("высота та же", math.abs(s.y - yb) < 0.01, string.format("dy=%.4f", s.y - yb))
 

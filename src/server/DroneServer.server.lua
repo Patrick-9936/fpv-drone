@@ -1,5 +1,5 @@
 --[[
-    DroneServer v9 — серверная (детерминированная) модель полёта.
+    DroneServer v10 — серверная (детерминированная) модель полёта.
 
     Почему переписано:
       * В v8 полёт держался на «перезаписи скорости» клиентом: AssemblyLinearVelocity
@@ -66,7 +66,10 @@ end
 local drones       = {}   -- [model] = rec
 local playerDrones = {}   -- [player] = rec
 
-local IDLE_INPUT = { pitch = 0, roll = 0, yaw = 0, throttle = 0.5 }
+-- Стики в центре (брошенный стик): газ чуть ниже точки висения → дрон проседает
+local NEUTRAL_INPUT = { pitch = 0, roll = 0, yaw = 0, throttle = 0.5 }
+-- Ввод пропал совсем (связь, свёрнутое приложение): газ убран, дрон падает
+local STALE_INPUT   = { pitch = 0, roll = 0, yaw = 0, throttle = 0 }
 
 local claimDrone   -- forward declaration (используется в ClickDetector/ProximityPrompt)
 
@@ -109,54 +112,77 @@ local function buildFilter()
     return params
 end
 
--- ────────────────────── ВЗРЫВ (БЕЗОПАСНЫЙ ДЛЯ ИГРОКА) ─────
+-- ────────────────────── ВЗРЫВ (ЛЁГКИЙ, БЕЗ ПРОВАЛОВ FPS) ──
+-- Раньше здесь создавался Instance.new("Explosion") + 60 частиц. На телефоне это
+-- и давало просадку и «двойной» взрыв (стандартный эффект Roblox + наши частицы).
 local function createExplosionFX(pos)
-    local exp = Instance.new("Explosion")
-    exp.Position = pos
-    exp.BlastRadius = 0
-    exp.BlastPressure = 0
-    exp.DestroyJointRadiusPercent = 0
-    exp.Parent = workspace
-
-    local sp = Instance.new("Part")
-    sp.Size = Vector3.new(1, 1, 1)
-    sp.Position = pos
-    sp.Anchored = true
-    sp.CanCollide = false
-    sp.CanQuery = false
-    sp.Transparency = 1
-    sp.Parent = workspace
+    local anchor = Instance.new("Part")
+    anchor.Name = "ExplosionFX"
+    anchor.Size = Vector3.new(1, 1, 1)
+    anchor.Position = pos
+    anchor.Anchored = true
+    anchor.CanCollide = false
+    anchor.CanQuery = false
+    anchor.CanTouch = false
+    anchor.CastShadow = false
+    anchor.Transparency = 1
+    anchor.Parent = workspace
 
     local boom = Instance.new("Sound")
     boom.SoundId = Config.SOUND_EXPLOSION
-    boom.Volume = 1.0
-    boom.RollOffMaxDistance = 500
-    boom.Parent = sp
+    boom.Volume = 0.9
+    boom.RollOffMaxDistance = 350
+    boom.Parent = anchor
     boom:Play()
 
-    local peFire = Instance.new("ParticleEmitter")
-    peFire.Color = ColorSequence.new({
-        NumberSequenceKeypoint.new(0,   Color3.fromRGB(255, 240, 120)),
-        NumberSequenceKeypoint.new(0.3, Color3.fromRGB(255, 120, 20)),
-        NumberSequenceKeypoint.new(1,   Color3.fromRGB(40, 40, 40)),
+    local fire = Instance.new("ParticleEmitter")
+    fire.Color = ColorSequence.new({
+        NumberSequenceKeypoint.new(0,   Color3.fromRGB(255, 235, 120)),
+        NumberSequenceKeypoint.new(0.35, Color3.fromRGB(255, 120, 20)),
+        NumberSequenceKeypoint.new(1,   Color3.fromRGB(45, 45, 45)),
     })
-    peFire.Size = NumberSequence.new({
-        NumberSequenceKeypoint.new(0,   2.5),
-        NumberSequenceKeypoint.new(0.5, 7.0),
+    fire.Size = NumberSequence.new({
+        NumberSequenceKeypoint.new(0,   1.5),
+        NumberSequenceKeypoint.new(0.4, 5.0),
         NumberSequenceKeypoint.new(1,   0.5),
     })
-    peFire.Transparency = NumberSequence.new({
-        NumberSequenceKeypoint.new(0,   0),
-        NumberSequenceKeypoint.new(0.8, 0.35),
-        NumberSequenceKeypoint.new(1,   1),
+    fire.Transparency = NumberSequence.new({
+        NumberSequenceKeypoint.new(0, 0),
+        NumberSequenceKeypoint.new(1, 1),
     })
-    peFire.Lifetime = NumberRange.new(0.8, 1.5)
-    peFire.Speed    = NumberRange.new(30, 65)
-    peFire.SpreadAngle = Vector2.new(180, 180)
-    peFire.Parent = sp
-    peFire:Emit(60)
+    fire.Lifetime = NumberRange.new(0.4, 0.8)
+    fire.Speed    = NumberRange.new(20, 40)
+    fire.Rate     = 0
+    fire.SpreadAngle = Vector2.new(160, 160)
+    fire.Parent = anchor
+    fire:Emit(16)
 
-    Debris:AddItem(sp, 5)
+    local smoke = Instance.new("ParticleEmitter")
+    smoke.Color = ColorSequence.new(Color3.fromRGB(60, 60, 60), Color3.fromRGB(25, 25, 25))
+    smoke.Size = NumberSequence.new({
+        NumberSequenceKeypoint.new(0, 2),
+        NumberSequenceKeypoint.new(1, 8),
+    })
+    smoke.Transparency = NumberSequence.new({
+        NumberSequenceKeypoint.new(0, 0.4),
+        NumberSequenceKeypoint.new(1, 1),
+    })
+    smoke.Lifetime = NumberRange.new(0.8, 1.4)
+    smoke.Speed    = NumberRange.new(6, 14)
+    smoke.Rate     = 0
+    smoke.Parent = anchor
+    smoke:Emit(8)
+
+    local light = Instance.new("PointLight")
+    light.Color = Color3.fromRGB(255, 170, 70)
+    light.Brightness = 5
+    light.Range = 22
+    light.Parent = anchor
+    task.delay(0.3, function()
+        if light and light.Parent then light.Enabled = false end
+    end)
+
+    Debris:AddItem(anchor, 2.5)
 end
 
 -- ────────────────────── МОДЕЛЬ ДРОНА ───────────────────────
@@ -311,9 +337,10 @@ local function buildDrone(pos, yaw)
         mode   = "idle",              -- "idle" | "piloted" | "parking"
         pilot  = nil,
         state  = FlightModel.new(Config, pos.X, pos.Y, pos.Z, yaw or 0),
-        input  = IDLE_INPUT,
+        input  = NEUTRAL_INPUT,
         inputAt = 0,
         idleSince = os.clock(),
+        exploded = false,
     }
     drones[model] = rec
 
@@ -383,12 +410,18 @@ end
 
 local function loseDrone(rec, reason)
     if not drones[rec.model] then return end
+    if rec.exploded then return end          -- эффект строго один на дрон
+    rec.exploded = true
+
     local pos = Vector3.new(rec.state.x, rec.state.y, rec.state.z)
 
     createExplosionFX(pos)
 
-    if rec.pilot then
-        lostRemote:FireClient(rec.pilot, reason or "crash")
+    local pilot = rec.pilot
+    if pilot then
+        playerDrones[pilot] = nil            -- пилот сразу свободен и может взять новый
+        rec.pilot = nil
+        lostRemote:FireClient(pilot, reason or "crash")
     end
     removeDrone(rec)
 end
@@ -403,7 +436,7 @@ local function parkDrone(rec)
         rec.pilot = nil
     end
     rec.mode = "parking"
-    rec.input = IDLE_INPUT
+    rec.input = NEUTRAL_INPUT
     rec.state.vy = 0
     rec.state.vx = 0
     rec.state.vz = 0
@@ -412,7 +445,15 @@ end
 
 claimDrone = function(rec, player)
     if not rec or not drones[rec.model] or rec.mode ~= "idle" then return end
-    if playerDrones[player] then return end   -- один дрон на игрока
+
+    -- Один дрон на игрока, но устаревшую запись (дрон уже удалён/не летает)
+    -- чистим, иначе игрок навсегда остаётся «занятым» и новые дроны не берутся
+    local existing = playerDrones[player]
+    if existing then
+        if existing == rec then return end
+        if drones[existing.model] and existing.mode == "piloted" then return end
+        playerDrones[player] = nil
+    end
 
     rec.mode  = "piloted"
     rec.pilot = player
@@ -421,7 +462,7 @@ claimDrone = function(rec, player)
     -- Сброс состояния: полный покой, стики в центре, газ = удержание высоты
     rec.state.vx, rec.state.vy, rec.state.vz = 0, 0, 0
     rec.state.pitch, rec.state.roll = 0, 0
-    rec.input = IDLE_INPUT
+    rec.input = NEUTRAL_INPUT
     rec.inputAt = os.clock()
 
     setPickupEnabled(rec, false)
@@ -439,7 +480,8 @@ local function movePiloted(rec, dt, params)
 
     local input = rec.input
     if (os.clock() - rec.inputAt) > Config.INPUT_TIMEOUT then
-        input = IDLE_INPUT
+        -- ввод пропал — не висим в воздухе, а падаем как настоящий FPV
+        input = STALE_INPUT
     end
     FlightModel.step(s, dt, input)
 
@@ -609,4 +651,4 @@ task.spawn(function()
     end
 end)
 
-print("[DroneServer] Сервер дронов v9 активен!")
+print("[DroneServer] Сервер дронов v10 активен!")

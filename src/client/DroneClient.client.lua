@@ -1,5 +1,5 @@
 --[[
-    DroneClient v9 — клиент только управляет и снимает.
+    DroneClient v10 — клиент только управляет и снимает.
 
     Что изменилось:
       * Клиент больше НЕ трогает физику (никаких BodyGyro / AssemblyLinearVelocity).
@@ -483,6 +483,19 @@ local function setCharVisible(vis)
     end
 end
 
+-- Свой дрон в FPV-режиме не должен быть виден: иначе при крене/тангаже в кадр
+-- лезут рама, лучи и пропеллеры. Прячем только локально (у других он виден).
+local function setOwnModelVisible(vis)
+    if not droneModel then return end
+    pcall(function()
+        for _, p in droneModel:GetDescendants() do
+            if p:IsA("BasePart") then
+                p.LocalTransparencyModifier = vis and 0 or 1
+            end
+        end
+    end)
+end
+
 local function setPropWash(enabled)
     if not droneModel then return end
     for _, p in droneModel:GetDescendants() do
@@ -510,12 +523,25 @@ local function showStatus(text)
     end)
 end
 
+-- Аварийный выход: работает даже если клиент потерял своё состояние,
+-- иначе игрок остаётся в мёртвой FPV-камере и не может взять новый дрон
+local function forceExit(text)
+    localUnmount(false, nil)
+    camera.CameraType = Enum.CameraType.Custom
+    if hudGui    then hudGui.Enabled    = false end
+    if mobileGui then mobileGui.Enabled = false end
+    setCharVisible(true)
+    if text then showStatus(text) end
+end
+
 -- ────────────────────── ВЫХОД (ЛОКАЛЬНЫЙ) ──────────────────
 localUnmount = function(notifyServer, lostReason)
     if not mounted then return end
     mounted = false
 
     resetInputs()
+
+    setOwnModelVisible(true)
 
     if motorSound then motorSound:Stop() end
     if windSound  then windSound:Stop()  end
@@ -550,8 +576,9 @@ end
 
 manualDetonate = function()
     if not mounted then return end
-    flash(Color3.fromRGB(255, 220, 150), 0.05)
-    localUnmount(false, "💥 ДРОН ПОДОРВАН")
+    -- без локальной вспышки: единственный эффект пришлёт сервер (DroneLost),
+    -- иначе взрыв визуально двоится
+    localUnmount(false, nil)
     selfDestructRemote:FireServer()
 end
 
@@ -584,6 +611,7 @@ local function mountDrone(drone)
 
     setPropWash(true)
     setCharVisible(false)
+    setOwnModelVisible(false)   -- свой корпус в кадре не нужен
 
     if hudGui    then hudGui.Enabled    = true end
     if mobileGui then mobileGui.Enabled = true end
@@ -601,7 +629,7 @@ RunService.RenderStepped:Connect(function(dt)
 
     -- Дрон исчез (взорван сервером / удалён) — выходим из режима пилота
     if not droneBody or not droneBody.Parent then
-        localUnmount(false, "ДРОН ПОТЕРЯН")
+        forceExit("ДРОН ПОТЕРЯН")
         return
     end
 
@@ -620,7 +648,7 @@ RunService.RenderStepped:Connect(function(dt)
     local targetCF = droneBody.CFrame
     smoothCF = smoothCF:Lerp(targetCF, math.clamp(dt * 22, 0, 1))
     camera.CFrame = smoothCF
-        * CFrame.new(0, 0.35, -1.35)
+        * CFrame.new(0, 0.45, -2.35)
         * CFrame.Angles(-CAM_TILT_RAD, 0, 0)
 
     -- 3. Скорость для HUD (по фактическому смещению)
@@ -663,10 +691,8 @@ lostRemote.OnClientEvent:Connect(function(reason)
     else
         text = "💥 ДРОН РАЗБИЛСЯ"
     end
-    if mounted then
-        flash(Color3.fromRGB(255, 90, 60), 0.15)
-        localUnmount(false, text)
-    end
+    flash(Color3.fromRGB(255, 90, 60), 0.15)
+    forceExit(text)   -- всегда, даже если клиент уже потерял своё состояние
 end)
 
 player.CharacterAdded:Connect(function()

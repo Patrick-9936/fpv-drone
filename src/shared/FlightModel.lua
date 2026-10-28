@@ -66,14 +66,15 @@ function FlightModel.step(s, dt, input)
     s.roll  = lerp(s.roll,  inRoll  * maxTilt, kTilt)
     s.throttle = inThrottle
 
-    -- 3. Вертикаль: центр стика = удержание высоты, отклонение = набор/спуск
+    -- 3. Вертикаль как на настоящем FPV: altitude hold НЕТ.
+    --    HOVER_THROTTLE — единственная точка, где дрон висит. Всё, что ниже неё,
+    --    даёт снижение, а брошенный стик (центр) — устойчивое проседание.
+    local hover = cfg.HOVER_THROTTLE or 0.62
     local targetVy
-    if inThrottle > 0.54 then
-        targetVy = ((inThrottle - 0.5) / 0.5) * cfg.MAX_CLIMB_SPEED
-    elseif inThrottle < 0.46 then
-        targetVy = ((inThrottle - 0.5) / 0.5) * cfg.MAX_FALL_SPEED
+    if inThrottle >= hover then
+        targetVy = ((inThrottle - hover) / (1 - hover)) * cfg.MAX_CLIMB_SPEED
     else
-        targetVy = 0
+        targetVy = ((inThrottle - hover) / hover) * cfg.MAX_FALL_SPEED
     end
     s.vy = lerp(s.vy, targetVy, clamp(cfg.VERT_ACCEL * dt, 0, 1))
 
