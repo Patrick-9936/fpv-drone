@@ -1,9 +1,26 @@
 --[[
-    DroneServer v8
-    - УСТРАНЁН RACE CONDITION: взрыв старого разбитого дрона больше НИКОГДА не задевает новый дрон!
-    - Сервер теперь идентифицирует каждый дрон по его уникальному ID/Model
-    - Автоспавн каждые 2 секунды: как только дрон взят или взорван — на площадке сразу появляется новый!
-    - Безопасный взрыв (не убивает пилота) + большой 5x3x5 Hitbox для 100% надёжного взятия дрона
+    DroneServer v9 — серверная (детерминированная) модель полёта.
+
+    Почему переписано:
+      * В v8 полёт держался на «перезаписи скорости» клиентом: AssemblyLinearVelocity
+        каждый кадр тянулся к цели лишь на ~11%, а гравитация снимала ~3.3 стад/с каждый
+        кадр. Дрон физически не мог выйти на заданную вертикальную скорость — отсюда
+        «не взлетает», «зависает на месте», «падает при наклоне».
+      * Дрон разанкоривался при взятии и отдавался в network ownership клиенту. Двое
+        дронов, оказавшихся в одной точке (спавнер плодил их на площадке), физически
+        расталкивали друг друга на огромной скорости — и «второй дрон взрывался сразу».
+      * Хитбоксы взорванных/занятых дронов оставались в мире и перехватывали клики —
+        из-за этого казалось, что «новые дроны не берутся».
+
+    Теперь:
+      * Дрон всегда Anchored. Движением управляет сервер через FlightModel (чистая
+        математика), клиент только присылает стики. Никакой борьбы с гравитацией.
+      * Коллизии считаются лучами: о землю дрон садится и скользит (никогда не взрывается),
+        взрыв — только лобовой удар о стену на скорости > CRASH_SPEED или кнопка «ПОДРЫВ».
+      * Дроны не сталкиваются друг с другом вообще (они исключены из лучей), поэтому
+        наложение моделей больше не может ничего взорвать.
+      * Взял дрон — хитбокс сразу перестаёт ловить клики. Взорвался/вышел — модель
+        удаляется целиком, в мире не остаётся «мёртвых» хитбоксов.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -11,7 +28,8 @@ local Players           = game:GetService("Players")
 local RunService        = game:GetService("RunService")
 local Debris            = game:GetService("Debris")
 
-local Config = require(ReplicatedStorage:WaitForChild("DroneConfig"))
+local Config      = require(ReplicatedStorage:WaitForChild("DroneConfig"))
+local FlightModel = require(ReplicatedStorage:WaitForChild("FlightModel"))
 
 -- ────────────────────── REMOTE EVENTS ──────────────────────
 local remotes = ReplicatedStorage:FindFirstChild("DroneRemotes")
@@ -21,22 +39,23 @@ if not remotes then
     remotes.Parent = ReplicatedStorage
 end
 
-local function getOrMakeRemote(name)
+local function getOrMakeRemote(name, className)
     local r = remotes:FindFirstChild(name)
     if not r then
-        r = Instance.new("RemoteEvent")
+        r = Instance.new(className or "RemoteEvent")
         r.Name = name
         r.Parent = remotes
     end
     return r
 end
 
-local mountRemote        = getOrMakeRemote("MountDrone")
-local unmountRemote      = getOrMakeRemote("UnmountDrone")
-local explodeRemote      = getOrMakeRemote("DroneExploded")
-local selfDestructRemote = getOrMakeRemote("SelfDestruct")
+local mountRemote    = getOrMakeRemote("MountDrone")     -- server -> client
+local lostRemote     = getOrMakeRemote("DroneLost")      -- server -> client
+local inputRemote    = getOrMakeRemote("DroneInput")     -- client -> server
+local unmountRemote  = getOrMakeRemote("UnmountDrone")   -- client -> server
+local selfDestructRemote = getOrMakeRemote("SelfDestruct") -- client -> server
 
--- ────────────────────── ПАПКА ДРОНОВ ────────────────────────
+-- ────────────────────── СОСТОЯНИЕ ──────────────────────────
 local dronesFolder = workspace:FindFirstChild("Drones")
 if not dronesFolder then
     dronesFolder = Instance.new("Folder")
@@ -44,8 +63,12 @@ if not dronesFolder then
     dronesFolder.Parent = workspace
 end
 
--- Таблица соответствия: player -> droneModel
-local playerDrones = {}
+local drones       = {}   -- [model] = rec
+local playerDrones = {}   -- [player] = rec
+
+local IDLE_INPUT = { pitch = 0, roll = 0, yaw = 0, throttle = 0.5 }
+
+local claimDrone   -- forward declaration (используется в ClickDetector/ProximityPrompt)
 
 -- ────────────────────── ВСПОМОГАТЕЛЬНЫЕ ────────────────────
 local function weld(part0, part1)
@@ -72,7 +95,21 @@ local function makePart(parent, name, size, cf, color, mat, canCollide, shape, t
     return p
 end
 
--- ────────────────────── ВЗРЫВ (БЕЗОПАСНЫЙ ДЛЯ ПИЛОТА) ───────
+local function buildFilter()
+    local list = { dronesFolder }
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr.Character then
+            table.insert(list, plr.Character)
+        end
+    end
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = list
+    params.IgnoreWater = true
+    return params
+end
+
+-- ────────────────────── ВЗРЫВ (БЕЗОПАСНЫЙ ДЛЯ ИГРОКА) ─────
 local function createExplosionFX(pos)
     local exp = Instance.new("Explosion")
     exp.Position = pos
@@ -86,6 +123,7 @@ local function createExplosionFX(pos)
     sp.Position = pos
     sp.Anchored = true
     sp.CanCollide = false
+    sp.CanQuery = false
     sp.Transparency = 1
     sp.Parent = workspace
 
@@ -121,65 +159,40 @@ local function createExplosionFX(pos)
     Debris:AddItem(sp, 5)
 end
 
-local function destroyDrone(drone, pos)
-    if not drone or not drone.Parent then return end
-
-    local explodePos = pos
-    if not explodePos and drone.PrimaryPart then
-        explodePos = drone.PrimaryPart.Position
-    end
-    explodePos = explodePos or Config.DRONE_SPAWN
-
-    createExplosionFX(explodePos)
-
-    -- Очищаем из списка
-    for plr, d in pairs(playerDrones) do
-        if d == drone then
-            playerDrones[plr] = nil
-        end
-    end
-
-    pcall(function()
-        drone:Destroy()
-    end)
-end
-
--- ────────────────────── СБОРКА МОДЕЛИ ДРОНА ────────────────
+-- ────────────────────── МОДЕЛЬ ДРОНА ───────────────────────
 local droneCounter = 0
 
-local function buildDroneAt(spawnPos)
+local function buildDrone(pos, yaw)
     droneCounter = droneCounter + 1
     local model = Instance.new("Model")
     model.Name = "FPV_Drone_" .. droneCounter
-
     model:SetAttribute("DroneId", droneCounter)
     model:SetAttribute("IsPiloted", false)
     model:SetAttribute("PilotUserId", 0)
 
-    local baseCF = CFrame.new(spawnPos)
+    local baseCF = CFrame.new(pos) * CFrame.Angles(0, yaw or 0, 0)
 
-    -- 1. Центральная рама (Body)
+    -- 1. Центральная рама (корень ассембли, всегда Anchored)
     local body = makePart(model, "Body",
         Vector3.new(2.2, 0.25, 2.2), baseCF,
         "Dark stone grey", Enum.Material.DiamondPlate, true)
     body.Anchored = true
     model.PrimaryPart = body
 
-    -- 2. Верхняя пластина
-    local topPlate = makePart(model, "TopPlate",
-        Vector3.new(1.3, 0.1, 1.3), baseCF * CFrame.new(0, 0.17, 0),
-        "Really black", Enum.Material.SmoothPlastic, false)
-    topPlate.Massless = true
-    weld(body, topPlate)
+    local function attach(name, size, offsetCF, color, mat, shape, transp)
+        local p = makePart(model, name, size, baseCF * offsetCF, color, mat, false, shape, transp)
+        p.Massless = true
+        weld(body, p)
+        return p
+    end
 
-    -- 3. Аккумулятор
-    local battery = makePart(model, "LiPoBattery",
-        Vector3.new(0.75, 0.45, 1.15), baseCF * CFrame.new(0, 0.42, 0.05),
-        "Bright yellow", Enum.Material.SmoothPlastic, false)
-    battery.Massless = true
-    weld(body, battery)
+    -- 2. Верхняя пластина и аккумулятор
+    attach("TopPlate", Vector3.new(1.3, 0.1, 1.3),
+        CFrame.new(0, 0.17, 0), "Really black", Enum.Material.SmoothPlastic)
+    attach("LiPoBattery", Vector3.new(0.75, 0.45, 1.15),
+        CFrame.new(0, 0.42, 0.05), "Bright yellow", Enum.Material.SmoothPlastic)
 
-    -- 4. 4 диагональных луча и моторы (X-frame)
+    -- 3. X-рама: 4 луча, 4 мотора, 4 пропеллера, 4 колпачка
     local armConfigs = {
         { dir = Vector3.new( 1, 0, -1), angle =  45, color = "Bright red" },
         { dir = Vector3.new(-1, 0, -1), angle = -45, color = "Bright blue" },
@@ -189,34 +202,21 @@ local function buildDroneAt(spawnPos)
 
     for i, cfg in ipairs(armConfigs) do
         local uDir = cfg.dir.Unit
-        local armCF = baseCF * CFrame.new(uDir * 0.9) * CFrame.Angles(0, math.rad(cfg.angle), 0)
-        local arm = makePart(model, "Arm" .. i,
-            Vector3.new(0.2, 0.12, 1.6), armCF,
-            "Dark stone grey", Enum.Material.Metal, false)
-        arm.Massless = true
-        weld(body, arm)
+        attach("Arm" .. i, Vector3.new(0.2, 0.12, 1.6),
+            CFrame.new(uDir * 0.9) * CFrame.Angles(0, math.rad(cfg.angle), 0),
+            "Dark stone grey", Enum.Material.Metal)
 
-        local mCF = baseCF * CFrame.new(uDir * 1.55) * CFrame.Angles(0, 0, math.rad(90))
-        local motor = makePart(model, "Motor" .. i,
-            Vector3.new(0.42, 0.25, 0.42), mCF,
-            "Really black", Enum.Material.Metal, false, Enum.PartType.Cylinder)
-        motor.Massless = true
-        weld(body, motor)
+        local motor = attach("Motor" .. i, Vector3.new(0.42, 0.25, 0.42),
+            CFrame.new(uDir * 1.55) * CFrame.Angles(0, 0, math.rad(90)),
+            "Really black", Enum.Material.Metal, Enum.PartType.Cylinder)
 
-        local pCF = baseCF * CFrame.new(uDir * 1.55 + Vector3.new(0, 0.18, 0)) * CFrame.Angles(0, 0, math.rad(90))
-        local prop = makePart(model, "Prop" .. i,
-            Vector3.new(0.04, 1.5, 1.5), pCF,
-            "Institutional white", Enum.Material.SmoothPlastic, false,
-            Enum.PartType.Cylinder, 0.45)
-        prop.Massless = true
-        weld(body, prop)
+        attach("Prop" .. i, Vector3.new(0.04, 1.5, 1.5),
+            CFrame.new(uDir * 1.55 + Vector3.new(0, 0.18, 0)) * CFrame.Angles(0, 0, math.rad(90)),
+            "Institutional white", Enum.Material.SmoothPlastic, Enum.PartType.Cylinder, 0.45)
 
-        local capCF = baseCF * CFrame.new(uDir * 1.55 + Vector3.new(0, 0.16, 0)) * CFrame.Angles(0, 0, math.rad(90))
-        local cap = makePart(model, "Cap" .. i,
-            Vector3.new(0.3, 0.12, 0.3), capCF,
-            cfg.color, Enum.Material.SmoothPlastic, false, Enum.PartType.Cylinder)
-        cap.Massless = true
-        weld(body, cap)
+        attach("Cap" .. i, Vector3.new(0.3, 0.12, 0.3),
+            CFrame.new(uDir * 1.55 + Vector3.new(0, 0.16, 0)) * CFrame.Angles(0, 0, math.rad(90)),
+            cfg.color, Enum.Material.SmoothPlastic, Enum.PartType.Cylinder)
 
         local pe = Instance.new("ParticleEmitter")
         pe.Name = "Wash"
@@ -238,61 +238,34 @@ local function buildDroneAt(spawnPos)
         pe.Parent    = motor
     end
 
-    -- 5. Камера
-    local camCF = baseCF * CFrame.new(0, 0.22, -1.25) * CFrame.Angles(math.rad(-Config.CAM_TILT), 0, 0)
-    local camBody = makePart(model, "CamBody",
-        Vector3.new(0.45, 0.35, 0.45), camCF,
-        "Really black", Enum.Material.SmoothPlastic, false)
-    camBody.Massless = true
-    weld(body, camBody)
+    -- 4. Камера
+    local camCF = CFrame.new(0, 0.22, -1.25) * CFrame.Angles(math.rad(-Config.CAM_TILT), 0, 0)
+    attach("CamBody", Vector3.new(0.45, 0.35, 0.45),
+        camCF, "Really black", Enum.Material.SmoothPlastic)
+    attach("CamLens", Vector3.new(0.24, 0.24, 0.08),
+        camCF * CFrame.new(0, 0, -0.24), "Bright blue", Enum.Material.Neon)
 
-    local lens = makePart(model, "CamLens",
-        Vector3.new(0.24, 0.24, 0.08), camCF * CFrame.new(0, 0, -0.24),
-        "Bright blue", Enum.Material.Neon, false)
-    lens.Massless = true
-    weld(body, lens)
+    -- 5. Огни и ножки
+    attach("LED_FL", Vector3.new(0.12, 0.08, 0.12), CFrame.new( 0.75, -0.05, -0.95),
+        "Lime green", Enum.Material.Neon)
+    attach("LED_FR", Vector3.new(0.12, 0.08, 0.12), CFrame.new(-0.75, -0.05, -0.95),
+        "Lime green", Enum.Material.Neon)
+    attach("LED_RL", Vector3.new(0.12, 0.08, 0.12), CFrame.new( 0.75, -0.05, 0.95),
+        "Bright red", Enum.Material.Neon)
+    attach("LED_RR", Vector3.new(0.12, 0.08, 0.12), CFrame.new(-0.75, -0.05, 0.95),
+        "Bright red", Enum.Material.Neon)
 
-    -- 6. Огни
-    local ledFL = makePart(model, "LED_FL",
-        Vector3.new(0.12, 0.08, 0.12), baseCF * CFrame.new( 0.75, -0.05, -0.95),
-        "Lime green", Enum.Material.Neon, false)
-    ledFL.Massless = true
-    weld(body, ledFL)
-
-    local ledFR = makePart(model, "LED_FR",
-        Vector3.new(0.12, 0.08, 0.12), baseCF * CFrame.new(-0.75, -0.05, -0.95),
-        "Lime green", Enum.Material.Neon, false)
-    ledFR.Massless = true
-    weld(body, ledFR)
-
-    local ledRL = makePart(model, "LED_RL",
-        Vector3.new(0.12, 0.08, 0.12), baseCF * CFrame.new( 0.75, -0.05, 0.95),
-        "Bright red", Enum.Material.Neon, false)
-    ledRL.Massless = true
-    weld(body, ledRL)
-
-    local ledRR = makePart(model, "LED_RR",
-        Vector3.new(0.12, 0.08, 0.12), baseCF * CFrame.new(-0.75, -0.05, 0.95),
-        "Bright red", Enum.Material.Neon, false)
-    ledRR.Massless = true
-    weld(body, ledRR)
-
-    -- 7. Ножки
-    local legOffsets = {
+    for _, lOff in ipairs({
         Vector3.new( 0.8, -0.22,  0.8),
         Vector3.new(-0.8, -0.22,  0.8),
         Vector3.new( 0.8, -0.22, -0.8),
         Vector3.new(-0.8, -0.22, -0.8),
-    }
-    for _, lOff in ipairs(legOffsets) do
-        local leg = makePart(model, "Leg",
-            Vector3.new(0.1, 0.28, 0.1), baseCF * CFrame.new(lOff),
-            "Really black", Enum.Material.SmoothPlastic, false)
-        leg.Massless = true
-        weld(body, leg)
+    }) do
+        attach("Leg", Vector3.new(0.1, 0.28, 0.1), CFrame.new(lOff),
+            "Really black", Enum.Material.SmoothPlastic)
     end
 
-    -- 8. Звуки
+    -- 6. Звуки
     local motorSnd = Instance.new("Sound")
     motorSnd.Name = "MotorSound"
     motorSnd.SoundId = Config.SOUND_MOTOR
@@ -308,16 +281,7 @@ local function buildDroneAt(spawnPos)
     beepSnd.Volume = 0.75
     beepSnd.Parent = body
 
-    -- 9. BodyGyro
-    local gyro = Instance.new("BodyGyro")
-    gyro.Name = "DroneGyro"
-    gyro.MaxTorque = Vector3.new(4e5, 4e5, 4e5)
-    gyro.P = 12000
-    gyro.D = 900
-    gyro.CFrame = baseCF
-    gyro.Parent = body
-
-    -- 10. Подсветка
+    -- 7. Подсветка (видно свободный дрон)
     local hl = Instance.new("Highlight")
     hl.Name = "DroneHL"
     hl.FillColor = Color3.fromRGB(0, 220, 255)
@@ -327,165 +291,322 @@ local function buildDroneAt(spawnPos)
     hl.Enabled = true
     hl.Parent = model
 
-    -- 11. ФУНКЦИЯ ЗАХВАТА ДРОНА
-    local function claimDrone(player)
-        if model:GetAttribute("IsPiloted") == true then return end
-        model:SetAttribute("IsPiloted", true)
-        model:SetAttribute("PilotUserId", player.UserId)
-
-        -- Если у игрока был старый дрон в воздухе — удаляем старый дрон
-        if playerDrones[player] and playerDrones[player] ~= model then
-            destroyDrone(playerDrones[player])
-        end
-        playerDrones[player] = model
-
-        hl.Enabled = false
-
-        -- Отключаем клики и промпты на взятом дроне
-        local hb = model:FindFirstChild("Hitbox")
-        if hb then
-            local p = hb:FindFirstChildOfClass("ProximityPrompt")
-            if p then p.Enabled = false end
-            local c = hb:FindFirstChildOfClass("ClickDetector")
-            if c then c.MaxActivationDistance = 0 end
-        end
-        local bc = body:FindFirstChildOfClass("ClickDetector")
-        if bc then bc.MaxActivationDistance = 0 end
-
-        -- Включаем физику и передаем Network Ownership клиенту
-        body.Anchored = false
-        pcall(function()
-            body:SetNetworkOwner(player)
-        end)
-
-        beepSnd:Play()
-
-        -- Уведомляем клиента
-        mountRemote:FireClient(player, model)
-        print(string.format("[DroneServer] %s взял дрон %s (ID %d)", player.Name, model.Name, droneCounter))
-    end
-
-    -- 12. БОЛЬШОЙ ХИТБОКС (5 x 3 x 5 studs) ДЛЯ 100% ВЗЯТИЯ
+    -- 8. Хитбокс для взятия (CanCollide=false, но ловит клик и промпт)
     local hitbox = makePart(model, "Hitbox",
-        Vector3.new(5, 3, 5), baseCF * CFrame.new(0, 0.5, 0),
+        Vector3.new(4.5, 2.6, 4.5), baseCF,
         "Really black", Enum.Material.SmoothPlastic, false, nil, 1)
     hitbox.Massless = true
     hitbox.CanQuery = true
     hitbox.CanTouch = true
     weld(body, hitbox)
 
+    model.Parent = dronesFolder
+
+    local rec = {
+        model  = model,
+        body   = body,
+        hitbox = hitbox,
+        hl     = hl,
+        beepSnd = beepSnd,
+        mode   = "idle",              -- "idle" | "piloted" | "parking"
+        pilot  = nil,
+        state  = FlightModel.new(Config, pos.X, pos.Y, pos.Z, yaw or 0),
+        input  = IDLE_INPUT,
+        inputAt = 0,
+        idleSince = os.clock(),
+    }
+    drones[model] = rec
+
+    -- Клик по дрону
     local click = Instance.new("ClickDetector")
     click.Name = "DroneClick"
     click.MaxActivationDistance = 40
     click.Parent = hitbox
-    click.MouseClick:Connect(claimDrone)
+    click.MouseClick:Connect(function(player)
+        claimDrone(rec, player)
+    end)
 
-    local bodyClick = Instance.new("ClickDetector")
-    bodyClick.Name = "BodyClick"
-    bodyClick.MaxActivationDistance = 40
-    bodyClick.Parent = body
-    bodyClick.MouseClick:Connect(claimDrone)
-
+    -- Промпт «Взлететь»
     local prompt = Instance.new("ProximityPrompt")
+    prompt.Name = "TakePrompt"
     prompt.ActionText = "Взлететь"
     prompt.ObjectText = "FPV Дрон"
     prompt.HoldDuration = 0
-    prompt.MaxActivationDistance = 22
+    prompt.MaxActivationDistance = 24
     prompt.KeyboardKeyCode = Enum.KeyCode.E
     prompt.RequiresLineOfSight = false
     prompt.Parent = hitbox
-    prompt.Triggered:Connect(claimDrone)
+    prompt.Triggered:Connect(function(player)
+        claimDrone(rec, player)
+    end)
 
-    model.Parent = dronesFolder
-    return model
+    return rec
+end
+
+-- ────────────────────── ВЗЯТИЕ / ОСВОБОЖДЕНИЕ ─────────────
+local function setPickupEnabled(rec, enabled)
+    rec.hitbox.CanQuery = enabled
+    rec.hitbox.CanTouch = enabled
+
+    local prompt = rec.hitbox:FindFirstChild("TakePrompt")
+    if prompt then prompt.Enabled = enabled end
+
+    local click = rec.hitbox:FindFirstChild("DroneClick")
+    if click then click.MaxActivationDistance = enabled and 40 or 0 end
+
+    rec.hl.Enabled = enabled
+    rec.model:SetAttribute("IsPiloted", not enabled)
+    if not enabled and rec.pilot then
+        rec.model:SetAttribute("PilotUserId", rec.pilot.UserId)
+    elseif enabled then
+        rec.model:SetAttribute("PilotUserId", 0)
+    end
+end
+
+local function placeBody(rec)
+    local s = rec.state
+    rec.body.CFrame = CFrame.new(s.x, s.y, s.z)
+        * CFrame.Angles(0, s.yaw, 0)
+        * CFrame.Angles(-s.pitch, 0, 0)
+        * CFrame.Angles(0, 0, -s.roll)
+end
+
+local function removeDrone(rec)
+    drones[rec.model] = nil
+    if rec.pilot and playerDrones[rec.pilot] == rec then
+        playerDrones[rec.pilot] = nil
+    end
+    pcall(function()
+        rec.model:Destroy()
+    end)
+end
+
+local function loseDrone(rec, reason)
+    if not drones[rec.model] then return end
+    local pos = Vector3.new(rec.state.x, rec.state.y, rec.state.z)
+
+    createExplosionFX(pos)
+
+    if rec.pilot then
+        lostRemote:FireClient(rec.pilot, reason or "crash")
+    end
+    removeDrone(rec)
+end
+
+-- Дрон выходит из-под управления: плавно садится и снова становится доступным
+local function parkDrone(rec)
+    if not drones[rec.model] then return end
+    if rec.pilot then
+        if playerDrones[rec.pilot] == rec then
+            playerDrones[rec.pilot] = nil
+        end
+        rec.pilot = nil
+    end
+    rec.mode = "parking"
+    rec.input = IDLE_INPUT
+    rec.state.vy = 0
+    rec.state.vx = 0
+    rec.state.vz = 0
+    setPickupEnabled(rec, true)
+end
+
+claimDrone = function(rec, player)
+    if not rec or not drones[rec.model] or rec.mode ~= "idle" then return end
+    if playerDrones[player] then return end   -- один дрон на игрока
+
+    rec.mode  = "piloted"
+    rec.pilot = player
+    playerDrones[player] = rec
+
+    -- Сброс состояния: полный покой, стики в центре, газ = удержание высоты
+    rec.state.vx, rec.state.vy, rec.state.vz = 0, 0, 0
+    rec.state.pitch, rec.state.roll = 0, 0
+    rec.input = IDLE_INPUT
+    rec.inputAt = os.clock()
+
+    setPickupEnabled(rec, false)
+
+    if rec.beepSnd then rec.beepSnd:Play() end
+
+    mountRemote:FireClient(player, rec.model)
+    print(string.format("[DroneServer] %s взял %s", player.Name, rec.model.Name))
+end
+
+-- ────────────────────── СТОЛКНОВЕНИЯ И ДВИЖЕНИЕ ───────────
+local function movePiloted(rec, dt, params)
+    local s = rec.state
+    local oldX, oldZ = s.x, s.z
+
+    local input = rec.input
+    if (os.clock() - rec.inputAt) > Config.INPUT_TIMEOUT then
+        input = IDLE_INPUT
+    end
+    FlightModel.step(s, dt, input)
+
+    -- Границы карты: улетел за карту — взрыв и респавн нового дрона
+    local hDist = math.sqrt(s.x * s.x + s.z * s.z)
+    if hDist > Config.BOUNDS_RADIUS or s.y < Config.BOUNDS_MIN_Y or s.y > Config.BOUNDS_MAX_Y then
+        loseDrone(rec, "borders")
+        return
+    end
+
+    -- Стены: луч по направлению движения на длину шага + радиус корпуса
+    local dx, dz = s.x - oldX, s.z - oldZ
+    local flatDist = math.sqrt(dx * dx + dz * dz)
+    if flatDist > 1e-5 then
+        local ux, uz = dx / flatDist, dz / flatDist
+        local origin = Vector3.new(oldX, s.y, oldZ)
+        local reach  = flatDist + Config.BODY_RADIUS
+        local hit = workspace:Raycast(origin, Vector3.new(ux * reach, 0, uz * reach), params)
+
+        if hit and math.abs(hit.Normal.Y) <= 0.6 then          -- именно стена, а не пол/потолок
+            local impactSpeed = FlightModel.horizontalSpeed(s)
+            if impactSpeed >= Config.CRASH_SPEED then
+                s.x, s.z = hit.Position.X, hit.Position.Z
+                loseDrone(rec, "crash")
+                return
+            end
+            -- медленное касание: отодвигаем от стены и скользим вдоль неё
+            local back = math.max(hit.Distance - Config.BODY_RADIUS, 0)
+            s.x = oldX + ux * back
+            s.z = oldZ + uz * back
+            FlightModel.cancelAlongNormal(s, hit.Normal.X, hit.Normal.Z)
+        end
+    end
+
+    -- Земля: садимся и скользим, взрыва НЕТ никогда
+    local gHit = workspace:Raycast(
+        Vector3.new(s.x, s.y, s.z),
+        Vector3.new(0, -(Config.GROUND_OFFSET + 0.4), 0),
+        params)
+    if gHit and gHit.Normal.Y > 0.5 then
+        local floorY = gHit.Position.Y + Config.GROUND_OFFSET
+        if s.y <= floorY then
+            s.y = floorY
+            if s.vy < 0 then s.vy = 0 end
+        end
+    end
+
+    placeBody(rec)
+end
+
+local function updateParking(rec, dt, params)
+    local s = rec.state
+
+    local relax = math.clamp(4 * dt, 0, 1)
+    s.pitch = s.pitch + (0 - s.pitch) * relax
+    s.roll  = s.roll  + (0 - s.roll)  * relax
+
+    local hit = workspace:Raycast(Vector3.new(s.x, s.y, s.z), Vector3.new(0, -400, 0), params)
+    local floorY = (hit and hit.Position.Y or (s.y - 1)) + Config.GROUND_OFFSET
+
+    if s.y > floorY + 0.05 then
+        s.y = math.max(floorY, s.y - Config.PARK_FALL_SPEED * dt)
+        s.vy = -Config.PARK_FALL_SPEED
+    else
+        s.y = floorY
+        s.vy = 0
+        rec.mode = "idle"
+        rec.idleSince = os.clock()
+    end
+
+    placeBody(rec)
 end
 
 -- ────────────────────── REMOTE HANDLERS ────────────────────
-
--- 💥 РУЧНАЯ ДЕТОНАЦИЯ
-selfDestructRemote.OnServerEvent:Connect(function(player, clientDrone)
-    -- ВАЖНО: сначала смотрим clientDrone, если он передан и валиден
-    local target = (clientDrone and clientDrone.Parent and clientDrone) or playerDrones[player]
-    if target and target.Parent then
-        destroyDrone(target)
+inputRemote.OnServerEvent:Connect(function(player, pitch, roll, yaw, throttle)
+    local rec = playerDrones[player]
+    if not rec or rec.mode ~= "piloted" then return end
+    if type(pitch) ~= "number" or type(roll) ~= "number"
+        or type(yaw) ~= "number" or type(throttle) ~= "number" then
+        return
     end
+    rec.input = {
+        pitch    = math.clamp(pitch, -1, 1),
+        roll     = math.clamp(roll, -1, 1),
+        yaw      = math.clamp(yaw, -1, 1),
+        throttle = math.clamp(throttle, 0, 1),
+    }
+    rec.inputAt = os.clock()
 end)
 
--- ВЗРЫВ ПРИ СТОЛКНОВЕНИИ
-explodeRemote.OnServerEvent:Connect(function(player, clientDrone, pos)
-    local target = (clientDrone and clientDrone.Parent and clientDrone) or playerDrones[player]
-    if target and target.Parent then
-        destroyDrone(target, pos)
-    end
+-- 💥 Ручная детонация
+selfDestructRemote.OnServerEvent:Connect(function(player)
+    local rec = playerDrones[player]
+    if rec then loseDrone(rec, "manual") end
 end)
 
--- ВЫХОД ИЗ ДРОНА
-unmountRemote.OnServerEvent:Connect(function(player, clientDrone)
-    local target = (clientDrone and clientDrone.Parent and clientDrone) or playerDrones[player]
-    if target and playerDrones[player] == target then
-        playerDrones[player] = nil
-    end
-    if target and target.Parent then
-        target:SetAttribute("IsPiloted", false)
-        target:SetAttribute("PilotUserId", 0)
-        pcall(function()
-            target.PrimaryPart:SetNetworkOwnershipAuto()
-        end)
-        task.delay(4, function()
-            if target and target.Parent and target:GetAttribute("IsPiloted") == false then
-                destroyDrone(target)
-            end
-        end)
-    end
+-- 🚪 Выход из дрона
+unmountRemote.OnServerEvent:Connect(function(player)
+    local rec = playerDrones[player]
+    if rec then parkDrone(rec) end
 end)
 
--- ИГРОК ВЫШЕЛ
 Players.PlayerRemoving:Connect(function(player)
-    local target = playerDrones[player]
+    local rec = playerDrones[player]
     playerDrones[player] = nil
-    if target and target.Parent then
-        destroyDrone(target)
+    if rec and drones[rec.model] then
+        removeDrone(rec)
     end
 end)
 
--- ────────────────────── АВТОСПАВНЕР (КАЖДЫЕ 2 СЕК) ──────────
+-- ────────────────────── ГЛАВНЫЙ ЦИКЛ ───────────────────────
+RunService.Heartbeat:Connect(function(dt)
+    if next(drones) == nil then return end
+
+    local params = buildFilter()
+    local now = os.clock()
+
+    local snapshot = {}
+    for model, rec in pairs(drones) do
+        if model.Parent then table.insert(snapshot, rec) end
+    end
+
+    for _, rec in ipairs(snapshot) do
+        if drones[rec.model] then
+            if rec.mode == "piloted" then
+                movePiloted(rec, dt, params)
+            elseif rec.mode == "parking" then
+                updateParking(rec, dt, params)
+            elseif rec.mode == "idle" and (now - rec.idleSince) > Config.IDLE_LIFETIME then
+                -- забытый ничейный дрон (и не тот, что на площадке) убираем
+                local distToPad = (Vector3.new(rec.state.x, rec.state.y, rec.state.z)
+                    - Config.DRONE_SPAWN).Magnitude
+                if distToPad > Config.PAD_CLEAR_RADIUS then
+                    removeDrone(rec)
+                else
+                    rec.idleSince = now
+                end
+            end
+        end
+    end
+end)
+
+-- ────────────────────── АВТОСПАВН ──────────────────────────
 task.spawn(function()
     while true do
+        local total = 0
         local padFree = true
-        for _, d in ipairs(dronesFolder:GetChildren()) do
-            if d:IsA("Model") and d.PrimaryPart and d.PrimaryPart.Parent then
-                local dist = (d.PrimaryPart.Position - Config.DRONE_SPAWN).Magnitude
-                -- Если на площадке уже стоит свободный дрон — новый не нужен
-                if dist < 6 and d:GetAttribute("IsPiloted") == false then
+
+        for model, rec in pairs(drones) do
+            if model.Parent then
+                total = total + 1
+                local dist = (Vector3.new(rec.state.x, rec.state.y, rec.state.z)
+                    - Config.DRONE_SPAWN).Magnitude
+                if rec.mode ~= "piloted" and dist < Config.PAD_CLEAR_RADIUS then
+                    -- на площадке уже стоит свободный дрон — плодить второй в той же точке нельзя
                     padFree = false
-                    break
                 end
             end
         end
 
-        if padFree then
-            buildDroneAt(Config.DRONE_SPAWN)
-            print("[DroneServer] Новый дрон заспавнен на площадке")
+        if total < Config.MAX_DRONES and padFree then
+            buildDrone(Config.DRONE_SPAWN, 0)
+            print("[DroneServer] Новый дрон готов на площадке")
         end
 
         task.wait(Config.RESPAWN_INTERVAL)
     end
 end)
 
--- ────────────────────── WATCHDOG ГРАНИЦ КАРТЫ ──────────────
-RunService.Heartbeat:Connect(function()
-    for _, d in ipairs(dronesFolder:GetChildren()) do
-        if d:IsA("Model") and d.PrimaryPart and d:GetAttribute("IsPiloted") == true then
-            local pos = d.PrimaryPart.Position
-            local hDist = Vector2.new(pos.X, pos.Z).Magnitude
-            if hDist > (Config.BOUNDS_RADIUS + 30)
-                or pos.Y < Config.BOUNDS_MIN_Y
-                or pos.Y > (Config.BOUNDS_MAX_Y + 40)
-            then
-                destroyDrone(d, pos)
-            end
-        end
-    end
-end)
-
-print("[DroneServer] Сервер дронов v8 активен!")
+print("[DroneServer] Сервер дронов v9 активен!")
