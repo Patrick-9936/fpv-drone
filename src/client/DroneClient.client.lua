@@ -1,5 +1,5 @@
 --[[
-    DroneClient v11 — клиент только управляет и снимает.
+    DroneClient v12 — клиент только управляет и снимает.
 
     Что изменилось:
       * Клиент больше НЕ трогает физику (никаких BodyGyro / AssemblyLinearVelocity).
@@ -352,6 +352,16 @@ local function resetInputs()
 end
 
 -- ────────────────────── ВВОД ──────────────────────────────
+-- Кривая отклика стика: у центра точнее (удобно целиться), у края — полная амплитуда.
+-- Раньше стоял квадрат (x*|x|), из-за него половина отклонения давала всего 25%
+-- отклика — отсюда ощущение «ватного» управления.
+local STICK_EXPO = 1.3
+local function stick(v)
+    if v == 0 then return 0 end
+    local sign = (v > 0) and 1 or -1
+    return sign * math.abs(v) ^ STICK_EXPO
+end
+
 if isMobile then
     UserInputService.InputBegan:Connect(function(input, gp)
         if gp or not mounted then return end
@@ -371,7 +381,7 @@ if isMobile then
 
     UserInputService.InputChanged:Connect(function(input)
         if input.UserInputType ~= Enum.UserInputType.Touch then return end
-        local dz = 0.06
+        local dz = 0.04
 
         if input == leftTouchId and leftJoyCenter then
             local delta = Vector2.new(input.Position.X, input.Position.Y) - leftJoyCenter
@@ -381,7 +391,7 @@ if isMobile then
             local rawX = (math.abs(norm.X) > dz) and norm.X or 0
             local rawY = (math.abs(norm.Y) > dz) and norm.Y or 0
 
-            yawIn = rawX * math.abs(rawX)
+            yawIn = stick(rawX)
             throttleIn = math.clamp(0.5 - (rawY * 0.5), 0, 1)
 
             if leftThumb then
@@ -396,8 +406,8 @@ if isMobile then
             local rawX = (math.abs(norm.X) > dz) and norm.X or 0
             local rawY = (math.abs(norm.Y) > dz) and norm.Y or 0
 
-            rollIn  = rawX * math.abs(rawX)
-            pitchIn = -rawY * math.abs(rawY)   -- палец вверх = полёт вперёд
+            rollIn  = stick(rawX)
+            pitchIn = stick(-rawY)             -- палец вверх = полёт вперёд
 
             if rightThumb then
                 rightThumb.Position = UDim2.new(0.5 + norm.X * 0.4, 0, 0.5 + norm.Y * 0.4, 0)

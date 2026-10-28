@@ -13,16 +13,17 @@ DroneConfig.IDLE_LIFETIME    = 120   -- забытый ничейный дрон
 DroneConfig.PARK_FALL_SPEED  = 14    -- скорость автоспуска после выхода из дрона
 
 -- ── ФИЗИКА ПОЛЁТА ──
-DroneConfig.MAX_TILT_DEG     = 42    -- максимальный угол наклона
-DroneConfig.TILT_LERP_SPEED  = 8     -- плавность отклика на стики
-DroneConfig.YAW_SPEED        = 3.2   -- скорость поворота курса (рад/с)
+DroneConfig.MAX_TILT_DEG     = 48    -- максимальный угол наклона
+DroneConfig.TILT_LERP_SPEED  = 12    -- насколько резво дрон ложится в наклон
+DroneConfig.YAW_SPEED        = 4.0   -- скорость поворота курса (рад/с)
 DroneConfig.MAX_CLIMB_SPEED  = 26    -- макс. вертикальная скорость вверх (стад/с)
 DroneConfig.MAX_FALL_SPEED   = 50    -- макс. вертикальная скорость падения (стад/с)
 DroneConfig.VERT_ACCEL       = 8     -- плавность изменения высоты
 DroneConfig.HOVER_THROTTLE   = 0.62  -- единственное положение газа, где дрон висит
                                      -- (0.5 = брошенный стик = проседает, 0 = падает)
-DroneConfig.MAX_SPEED        = 85    -- макс. горизонтальная скорость (стад/с)
-DroneConfig.HORIZONTAL_ACCEL = 4.5   -- разгон/торможение по горизонтали
+DroneConfig.MAX_SPEED        = 100   -- макс. горизонтальная скорость (стад/с)
+DroneConfig.HORIZONTAL_ACCEL = 6.0   -- разгон/торможение по горизонтали
+DroneConfig.FORWARD_LIFT     = 10    -- наклон вперёд даёт +10 стад/с высоты
 DroneConfig.INPUT_TIMEOUT    = 0.5   -- если ввод пропал — считаем газ полностью убранным
 DroneConfig.RELEASE_AFTER    = 2.5   -- столько секунд без ввода — дрон освобождается сам
                                      -- (иначе игрок навсегда занят и новый взять не может)

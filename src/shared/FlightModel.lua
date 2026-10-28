@@ -76,15 +76,19 @@ function FlightModel.step(s, dt, input)
     else
         targetVy = ((inThrottle - hover) / hover) * cfg.MAX_FALL_SPEED
     end
+
+    -- Полёт вперёд даёт небольшую прибавку высоты: дрон не «клеёт» вниз
+    -- и траектория остаётся ровной, как у настоящего FPV на газу.
+    local fwdRatio = s.pitch / maxTilt
+    local rgtRatio = s.roll  / maxTilt
+    targetVy = targetVy + fwdRatio * (cfg.FORWARD_LIFT or 0)
+
     s.vy = lerp(s.vy, targetVy, clamp(cfg.VERT_ACCEL * dt, 0, 1))
 
     -- 4. Горизонталь: направление зависит только от курса, величина — от наклона
     local sinY, cosY = math.sin(s.yaw), math.cos(s.yaw)
     local fwdX, fwdZ = -sinY, -cosY   -- LookVector в плоскости XZ
     local rgtX, rgtZ =  cosY, -sinY   -- RightVector в плоскости XZ
-
-    local fwdRatio = s.pitch / maxTilt
-    local rgtRatio = s.roll  / maxTilt
 
     local targetVx = (fwdX * fwdRatio + rgtX * rgtRatio) * cfg.MAX_SPEED
     local targetVz = (fwdZ * fwdRatio + rgtZ * rgtRatio) * cfg.MAX_SPEED

@@ -16,15 +16,16 @@ local FlightModel = require("FlightModel")
 
 -- Те же числа, что в DroneConfig
 local CFG = {
-    MAX_TILT_DEG     = 42,
-    TILT_LERP_SPEED  = 8,
-    YAW_SPEED        = 3.2,
+    MAX_TILT_DEG     = 48,
+    TILT_LERP_SPEED  = 12,
+    YAW_SPEED        = 4.0,
     MAX_CLIMB_SPEED  = 26,
     MAX_FALL_SPEED   = 50,
     VERT_ACCEL       = 8,
     HOVER_THROTTLE   = 0.62,
-    MAX_SPEED        = 85,
-    HORIZONTAL_ACCEL = 4.5,
+    MAX_SPEED        = 100,
+    HORIZONTAL_ACCEL = 6.0,
+    FORWARD_LIFT     = 10,
 }
 
 local DT = 1 / 60
@@ -83,11 +84,12 @@ check("скорость ≈ MAX_CLIMB_SPEED",
     math.abs(s.vy - CFG.MAX_CLIMB_SPEED) < 0.5, string.format("vy=%.2f", s.vy))
 
 -- ──────────────────────────────────────────────
-print("\n[3] Наклон вперёд на газу висения не роняет высоту")
+print("\n[3] Наклон вперёд держит высоту и не «клюёт» вниз")
 s = FlightModel.new(CFG, 0, 50, 0, 0)
 local yBefore = s.y
-run(s, 3, { pitch = 1, roll = 0, yaw = 0, throttle = CFG.HOVER_THROTTLE })
-check("высота та же", math.abs(s.y - yBefore) < 0.01, string.format("dy=%.4f", s.y - yBefore))
+run(s, 3, { pitch = 1, roll = 0, yaw = 0, throttle = 0.5 })
+check("высота почти не изменилась", math.abs(s.y - yBefore) < 4,
+    string.format("dy=%.2f", s.y - yBefore))
 check("летит вперёд (-Z)", s.z < -100, string.format("z=%.1f", s.z))
 check("разогнался до ~MAX_SPEED",
     math.abs(FlightModel.horizontalSpeed(s) - CFG.MAX_SPEED) < 0.5,
@@ -115,7 +117,7 @@ run(s, 3, { pitch = 1, roll = 0, yaw = 0, throttle = 0.5 })
 local vMax = FlightModel.horizontalSpeed(s)
 run(s, 0.1, NEUTRAL)
 local vAfter = FlightModel.horizontalSpeed(s)
-check("через 0.1 с скорость ещё почти прежняя (>85%)", vAfter / vMax > 0.85,
+check("через 0.1 с скорость ещё держится (>50%)", vAfter / vMax > 0.5,
     string.format("%.2f", vAfter / vMax))
 run(s, 3, NEUTRAL)
 check("через 3 с почти остановился", FlightModel.horizontalSpeed(s) < 1,
