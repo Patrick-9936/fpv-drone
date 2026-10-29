@@ -7,7 +7,8 @@ DroneConfig.HOVER_HEIGHT = 6.5
 
 -- ── СПАВН ──
 DroneConfig.RESPAWN_INTERVAL = 2     -- проверяем площадку раз в 2 секунды
-DroneConfig.MAX_DRONES       = 3     -- больше дронов в мире не держим
+DroneConfig.MAX_DRONES       = 4     -- больше дронов в мире не держим
+DroneConfig.TAKE_RADIUS      = 90    -- с какого расстояния сервер даёт взять дрон
 DroneConfig.PAD_CLEAR_RADIUS = 10    -- ближе этого к площадке новый дрон не спавним
 DroneConfig.IDLE_LIFETIME    = 120   -- забытый ничейный дрон убираем через 2 минуты
 DroneConfig.PARK_FALL_SPEED  = 14    -- скорость автоспуска после выхода из дрона
@@ -32,10 +33,27 @@ DroneConfig.RELEASE_AFTER    = 2.5   -- столько секунд без вв�
 DroneConfig.CAM_TILT = 14            -- наклон FPV-камеры вверх (градусы)
 
 -- ── КОЛЛИЗИИ ──
-DroneConfig.CRASH_SPEED  = 30   -- взрыв, если в стену влетаем на такой скорости (нормальная
+DroneConfig.CRASH_SPEED  = 26   -- взрыв, если в стену влетаем на такой скорости (нормальная
                                -- составляющая, то есть скольжение вдоль стены не считается)
+DroneConfig.GROUND_CRASH_SPEED = 34 -- вертикальный удар о землю на такой скорости — взрыв
+DroneConfig.RING_THICKNESS = 4      -- толщина «плоскости» кольца для зачёта прохода
 DroneConfig.BODY_RADIUS  = 1.3  -- радиус корпуса для проверки стен
 DroneConfig.GROUND_OFFSET = 1.15 -- насколько центр дрона выше поверхности при посадке
+
+-- ── ГОНКА ──
+-- Кольца проходятся строго по порядку: 1 -> 2 -> 3 -> финиш круга.
+-- normal — ось, вдоль которой «протыкается» кольцо (здесь все кольца смотрят в Z).
+DroneConfig.RACE_RINGS = {
+    { pos = Vector3.new(35, 14, -40),  radius = 9,  normal = Vector3.new(0, 0, 1) },
+    { pos = Vector3.new(35, 18, -90),  radius = 11, normal = Vector3.new(0, 0, 1) },
+    { pos = Vector3.new(80, 20, -90),  radius = 12, normal = Vector3.new(0, 0, 1) },
+}
+DroneConfig.RACE_MIN_LAP = 5        -- круги короче этого не засчитываем (античит на телепорт)
+
+-- ── ХРАНИЛИЩЕ РЕКОРДОВ ──
+DroneConfig.RECORD_STORE         = "FPV_Drone_Records_v1"
+DroneConfig.RECORD_ORDERED_STORE = "FPV_Drone_BestLap_v1"
+DroneConfig.RECORD_AUTOSAVE      = 30   -- секунд между сохранениями (без спама DataStore)
 
 -- ── ГРАНИЦЫ КАРТЫ ──
 DroneConfig.BOUNDS_RADIUS = 400

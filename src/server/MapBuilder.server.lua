@@ -105,23 +105,65 @@ local obs = Instance.new("Folder")
 obs.Name = "Obstacles"
 obs.Parent = map
 
--- Flight ring 1
-local function makeRing(pos, radius)
-	local segments = 12
+-- ───────────── ГОНОЧНЫЕ КОЛЬЦА ─────────────
+-- Кольца — это чекпоинты гонки. Геометрия берётся из DroneConfig.RACE_RINGS,
+-- чтобы визуал и зачёт прохода не разъезжались.
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Config = require(ReplicatedStorage:WaitForChild("DroneConfig"))
+
+local ringsFolder = Instance.new("Folder")
+ringsFolder.Name = "RaceRings"
+ringsFolder.Parent = obs
+
+local function makeRing(index, pos, radius)
+	local model = Instance.new("Model")
+	model.Name = "RaceRing_" .. index
+	model:SetAttribute("RingIndex", index)
+	model.Parent = ringsFolder
+
+	local segments = 18
 	for i = 1, segments do
 		local a1 = (i - 1) * (math.pi * 2 / segments)
 		local a2 = i * (math.pi * 2 / segments)
 		local midA = (a1 + a2) / 2
-		local p = makePart(obs, "RingSeg",
+		local p = makePart(model, "Seg",
 			pos + Vector3.new(math.cos(midA) * radius, math.sin(midA) * radius, 0),
-			Vector3.new(radius * 0.55, 0.6, 0.6), "Bright yellow", Enum.Material.Neon)
-		p.CFrame = CFrame.new(p.Position) * CFrame.Angles(0, 0, midA + math.pi/2)
+			Vector3.new(radius * 0.42, 0.85, 0.85), "Medium stone grey", Enum.Material.Neon)
+		p.CFrame = CFrame.new(p.Position) * CFrame.Angles(0, 0, midA + math.pi / 2)
+		-- Кольца не участвуют ни в физике, ни в лучах: иначе дрон взрывался бы,
+		-- пролетая «сквозь» обод. Это чистая визуальная цель.
+		p.CanCollide = false
+		p.CanQuery = false
+		p.CanTouch = false
 	end
+
+	-- Номер кольца над ободом
+	local sign = makePart(model, "Sign", pos + Vector3.new(0, radius + 3.5, 0),
+		Vector3.new(6, 3, 0.2), "Really black", Enum.Material.SmoothPlastic)
+	sign.CanCollide = false
+	sign.CanQuery = false
+
+	local bill = Instance.new("BillboardGui")
+	bill.Size = UDim2.new(0, 64, 0, 42)
+	bill.AlwaysOnTop = true
+	bill.Parent = sign
+
+	local label = Instance.new("TextLabel")
+	label.Size = UDim2.new(1, 0, 1, 0)
+	label.BackgroundTransparency = 1
+	label.Text = tostring(index)
+	label.TextColor3 = Color3.fromRGB(240, 240, 240)
+	label.TextStrokeTransparency = 0.4
+	label.Font = Enum.Font.GothamBold
+	label.TextSize = 26
+	label.Parent = bill
+
+	return model
 end
 
-makeRing(Vector3.new(35, 14, -40), 9)
-makeRing(Vector3.new(35, 18, -90), 11)
-makeRing(Vector3.new(80, 20, -90), 12)
+for index, ring in ipairs(Config.RACE_RINGS) do
+	makeRing(index, ring.pos, ring.radius)
+end
 
 -- Tower
 makePart(obs, "Tower", Vector3.new(90, 25, 50),

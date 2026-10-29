@@ -30,6 +30,8 @@ local Debris            = game:GetService("Debris")
 
 local Config      = require(ReplicatedStorage:WaitForChild("DroneConfig"))
 local FlightModel = require(ReplicatedStorage:WaitForChild("FlightModel"))
+local Tuning      = require(ReplicatedStorage:WaitForChild("Tuning"))
+local PlayerData  = require(ReplicatedStorage:WaitForChild("PlayerData"))
 
 -- ────────────────────── REMOTE EVENTS ──────────────────────
 local remotes = ReplicatedStorage:FindFirstChild("DroneRemotes")
@@ -54,6 +56,12 @@ local lostRemote     = getOrMakeRemote("DroneLost")      -- server -> client
 local inputRemote    = getOrMakeRemote("DroneInput")     -- client -> server
 local unmountRemote  = getOrMakeRemote("UnmountDrone")   -- client -> server
 local selfDestructRemote = getOrMakeRemote("SelfDestruct") -- client -> server
+local requestRemote      = getOrMakeRemote("RequestDrone")  -- client -> server: взять ближайший
+local tuningRemote       = getOrMakeRemote("TuningChanged")-- client -> server
+local tuningRequest      = getOrMakeRemote("RequestTuning") -- client -> server: пришли мои настройки
+local tuningSync         = getOrMakeRemote("TuningSync")    -- server -> client
+local notifyRemote       = getOrMakeRemote("Notify")        -- server -> client, текст
+local raceRemote        = getOrMakeRemote("RaceEvent")     -- server -> client, гонка
 
 -- ────────────────────── СОСТОЯНИЕ ──────────────────────────
 local dronesFolder = workspace:FindFirstChild("Drones")
@@ -65,6 +73,11 @@ end
 
 local drones       = {}   -- [model] = rec
 local playerDrones = {}   -- [player] = rec
+local playerTuning = {}   -- [player] = настройки полёта
+
+local function tuningFor(player)
+    return playerTuning[player] or Tuning.defaults()
+end
 
 -- Стики в центре (брошенный стик): газ чуть ниже точки висения → дрон проседает
 local NEUTRAL_INPUT = { pitch = 0, roll = 0, yaw = 0, throttle = 0.5 }
@@ -446,6 +459,7 @@ local function loseDrone(rec, reason)
 
     local pilot = rec.pilot
     if pilot then
+        task.spawn(function() PlayerData.addCrash(pilot) end)
         playerDrones[pilot] = nil            -- пилот сразу свободен и может взять новый
         rec.pilot = nil
         freezeCharacter(pilot, false)
@@ -472,26 +486,58 @@ local function parkDrone(rec)
     setPickupEnabled(rec, true)
 end
 
-claimDrone = function(rec, player)
-    if not rec or not drones[rec.model] or rec.mode ~= "idle" then return end
+local function notify(player, text)
+    if player and player.Parent then
+        notifyRemote:FireClient(player, text)
+    end
+end
 
-    -- Один дрон на игрока. Если запись есть, но игрок жмёт на ДРУГОЙ дрон, значит
-    -- он уже не в FPV — старый дрон просто паркуем, иначе игрок навсегда «занят»
+claimDrone = function(rec, player)
+    if not rec or not player then return end
+    if not rec.model or not rec.model.Parent then return end
+    if not drones[rec.model] or rec.exploded then return end
+
+    -- Дрон занят другим игроком — его не отбираем
+    if rec.pilot and rec.pilot ~= player then
+        notify(player, "Этот дрон занят другим игроком")
+        return
+    end
+    if rec.mode == "piloted" and rec.pilot == player then return end
+
+    -- Один дрон на игрока. Если запись осталась от прошлой попытки (дрон уже
+    -- уничтожен или освобождён) — чистим её молча, иначе игрок «занят» навсегда
+    -- и новый дрон взять не может. Это и была причина бага «после взрыва не берётся».
     local existing = playerDrones[player]
     if existing then
         if existing == rec then return end
-        parkDrone(existing)
+        if not existing.model or not existing.model.Parent
+            or not drones[existing.model] or existing.exploded then
+            playerDrones[player] = nil
+            if existing.pilot == player then
+                existing.pilot = nil
+                freezeCharacter(player, false)
+            end
+        else
+            parkDrone(existing)
+        end
     end
 
     rec.mode  = "piloted"
     rec.pilot = player
+    rec.exploded = false
     playerDrones[player] = rec
 
     -- Сброс состояния: полный покой, стики в центре, газ = удержание высоты
     rec.state.vx, rec.state.vy, rec.state.vz = 0, 0, 0
     rec.state.pitch, rec.state.roll = 0, 0
+    rec.state.cfg = Tuning.applyCfg(Config, tuningFor(player))
     rec.input = NEUTRAL_INPUT
     rec.inputAt = os.clock()
+
+    -- Гонка: круг начинается с момента посадки в дрон
+    rec.raceIndex = 1
+    rec.lapStart = os.clock()
+    raceRemote:FireClient(player, "start", #Config.RACE_RINGS)
 
     setPickupEnabled(rec, false)
     freezeCharacter(player, true)
@@ -502,16 +548,60 @@ claimDrone = function(rec, player)
     print(string.format("[DroneServer] %s взял %s", player.Name, rec.model.Name))
 end
 
+-- ────────────────────── ГОНКА (КОЛЬЦА) ─────────────────
+-- Кольца проходятся строго по порядку. Зачёт — когда дрон пересекает плоскость
+-- кольца внутри его радиуса. Круг засчитывается на последнем кольце, время
+-- и рекорд уезжают в leaderstats и DataStore.
+local checkRace
+
+checkRace = function(rec)
+    local rings = Config.RACE_RINGS
+    local idx = rec.raceIndex
+    if not rings or not idx or not rings[idx] then return end
+
+    local ring = rings[idx]
+    local n = ring.normal
+    local dx = rec.state.x - ring.pos.X
+    local dy = rec.state.y - ring.pos.Y
+    local dz = rec.state.z - ring.pos.Z
+
+    local along = dx * n.X + dy * n.Y + dz * n.Z
+    if math.abs(along) > (Config.RING_THICKNESS * 0.5) then return end
+
+    local px = dx - n.X * along
+    local py = dy - n.Y * along
+    local pz = dz - n.Z * along
+    if math.sqrt(px * px + py * py + pz * pz) > ring.radius * 0.98 then return end
+
+    local pilot = rec.pilot
+    rec.raceIndex = idx + 1
+
+    if rec.raceIndex > #rings then
+        rec.raceIndex = 1
+        local lapTime = os.clock() - (rec.lapStart or os.clock())
+        rec.lapStart = os.clock()
+
+        if lapTime >= Config.RACE_MIN_LAP and pilot then
+            local res = PlayerData.recordLap(pilot, lapTime)
+            raceRemote:FireClient(pilot, "lap", lapTime, res.best, res.improved)
+        end
+    elseif pilot then
+        raceRemote:FireClient(pilot, "checkpoint", rec.raceIndex, #rings)
+    end
+end
+
 -- ────────────────────── СТОЛКНОВЕНИЯ И ДВИЖЕНИЕ ───────────
 local function movePiloted(rec, dt, params)
     local s = rec.state
     local oldX, oldZ = s.x, s.z
 
     local input = rec.input
-    if (os.clock() - rec.inputAt) > Config.INPUT_TIMEOUT then
+    local stale = (os.clock() - rec.inputAt) > Config.INPUT_TIMEOUT
+    if stale then
         -- ввод пропал — не висим в воздухе, а падаем как настоящий FPV
         input = STALE_INPUT
     end
+    rec.inputStale = stale
     FlightModel.step(s, dt, input)
 
     -- Границы карты: улетел за карту — взрыв и респавн нового дрона
@@ -558,7 +648,9 @@ local function movePiloted(rec, dt, params)
         end
     end
 
-    -- Земля: садимся и скользим, взрыва НЕТ никогда
+    -- Земля: мягкую посадку прощаем, а вот влететь в землю с высоты — взрыв.
+    -- Раньше земля не взрывала вообще, из-за этого пикирование в газон
+    -- выглядело так, будто столкновения не работают.
     local gHit = workspace:Raycast(
         Vector3.new(s.x, s.y, s.z),
         Vector3.new(0, -(Config.GROUND_OFFSET + 0.4), 0),
@@ -567,11 +659,22 @@ local function movePiloted(rec, dt, params)
         local floorY = gHit.Position.Y + Config.GROUND_OFFSET
         if s.y <= floorY then
             s.y = floorY
+            local impact = -s.vy
+
+            -- если ввод просто пропал (свернул игру) — не убиваем дрон,
+            -- он должен спокойно сесть и снова быть доступным
+            if impact >= Config.GROUND_CRASH_SPEED and not stale then
+                s.vy = 0
+                loseDrone(rec, "crash")
+                return
+            end
+
             if s.vy < 0 then s.vy = 0 end
         end
     end
 
     placeBody(rec)
+    checkRace(rec)
 end
 
 local function updateParking(rec, dt, params)
@@ -626,11 +729,104 @@ unmountRemote.OnServerEvent:Connect(function(player)
     if rec then parkDrone(rec) end
 end)
 
--- Персонаж переродился (упал/умер), пока летал: освобождаем дрон
+-- 🎮 Кнопка «Взять дрон»: сервер сам ищет свободный дрон рядом с игроком.
+-- Это надёжнее кликов по невидимому хитбоксу и промптов, и заодно чинит
+-- случай «после взрыва не берётся следующий».
+requestRemote.OnServerEvent:Connect(function(player)
+    -- Если запись пилота осталась от прошлой попытки (дрон взорван/удалён),
+    -- не отказываем сразу, а вычищаем её — иначе кнопка «Взять дрон» молчит
+    -- именно в том случае, на который жаловался игрок.
+    local existing = playerDrones[player]
+    if existing then
+        if existing.model and existing.model.Parent
+            and drones[existing.model] and not existing.exploded then
+            return   -- уже управляет живым дроном
+        end
+        playerDrones[player] = nil
+        if existing.pilot == player then existing.pilot = nil end
+        freezeCharacter(player, false)
+    end
+
+    local char = player.Character
+    local origin = Config.DRONE_SPAWN
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum and char:FindFirstChild("HumanoidRootPart") then
+        origin = char.HumanoidRootPart.Position
+    end
+
+    local best, bestDist = nil, math.huge
+    for model, rec in pairs(drones) do
+        if model.Parent and not rec.exploded and (not rec.pilot or rec.pilot == player)
+            and rec.mode ~= "piloted" then
+            local d = (Vector3.new(rec.state.x, rec.state.y, rec.state.z) - origin).Magnitude
+            if d < bestDist then
+                best, bestDist = rec, d
+            end
+        end
+    end
+
+    if best and bestDist <= Config.TAKE_RADIUS then
+        claimDrone(best, player)
+    else
+        notify(player, "Свободного дрона рядом нет — он появится на площадке")
+    end
+end)
+
+-- ⚙️ Настройки полёта: клиент присылает изменённое поле, сервер всё проверяет
+-- (границы, типы, известные ключи) и сохраняет в DataStore.
+tuningRemote.OnServerEvent:Connect(function(player, partial)
+    if type(partial) ~= "table" then return end
+
+    local current = tuningFor(player)
+    local merged = {}
+    for k, v in pairs(current) do merged[k] = v end
+    for k, v in pairs(partial) do merged[k] = v end
+
+    local clean = Tuning.sanitize(merged)
+    playerTuning[player] = clean
+
+    local rec = playerDrones[player]
+    if rec and rec.state then
+        rec.state.cfg = Tuning.applyCfg(Config, clean)
+    end
+
+    tuningSync:FireClient(player, clean)
+    task.spawn(function()
+        PlayerData.setTuning(player, clean)
+    end)
+end)
+
+-- Персональные настройки выдаём сразу при входе (потом обновим, когда DataStore
+-- догрузит сохранённые значения).
+local function sendTuning(player)
+    tuningSync:FireClient(player, tuningFor(player))
+end
+
+-- Клиент может попросить настройки заново: сообщения, отправленные до того,
+-- как клиент подписался, теряются, иначе ползунки остались бы дефолтными.
+tuningRequest.OnServerEvent:Connect(function(player)
+    sendTuning(player)
+end)
+
+-- Новый игрок: настройки по умолчанию сразу, сохранённые — когда догрузится
+PlayerData.onLoaded(function(player, data)
+    playerTuning[player] = Tuning.sanitize(data.tuning)
+    sendTuning(player)
+end)
+
+-- Персонаж переродился (упал/умер), пока летал: освобождаем дрон.
+-- Заодно сразу готовим настройки и отправляем их клиенту.
 local function hookCharacter(player)
-    player.CharacterAdded:Connect(function()
+    playerTuning[player] = playerTuning[player] or Tuning.sanitize(PlayerData.getTuning(player))
+    sendTuning(player)
+
+    player.CharacterAdded:Connect(function(char)
         local rec = playerDrones[player]
         if rec then parkDrone(rec) end
+
+        -- персонаж не должен уметь ходить, пока игрок в FPV
+        local hum = char:WaitForChild("Humanoid", 5)
+        if hum and playerDrones[player] then freezeCharacter(player, true) end
     end)
 end
 Players.PlayerAdded:Connect(hookCharacter)
@@ -639,6 +835,7 @@ for _, p in ipairs(Players:GetPlayers()) do hookCharacter(p) end
 Players.PlayerRemoving:Connect(function(player)
     local rec = playerDrones[player]
     playerDrones[player] = nil
+    playerTuning[player] = nil
     if rec and drones[rec.model] then
         removeDrone(rec)
     end
@@ -667,6 +864,9 @@ RunService.Heartbeat:Connect(function(dt)
                     lostRemote:FireClient(pilot, "timeout")
                     parkDrone(rec)
                 else
+                    -- пока игрок летает, персонаж должен стоять на месте:
+                    -- серверный WalkSpeed может перетереть респавн/скрипты
+                    if pilot then freezeCharacter(pilot, true) end
                     movePiloted(rec, dt, params)
                 end
             elseif rec.mode == "parking" then
@@ -712,4 +912,4 @@ task.spawn(function()
     end
 end)
 
-print("[DroneServer] Сервер дронов v12 активен!")
+print("[DroneServer] Сервер дронов v13 (настройки + гонка + рекорды) активен!")

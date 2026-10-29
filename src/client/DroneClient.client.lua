@@ -1,24 +1,24 @@
 --[[
-    DroneClient v12 — клиент только управляет и снимает.
+    DroneClient v13 — управление, камера, интерфейс.
 
-    Что изменилось:
-      * Клиент больше НЕ трогает физику (никаких BodyGyro / AssemblyLinearVelocity).
-        Он читает стики 30 раз в секунду и отправляет их на сервер (DroneInput).
-      * Сервер двигает дрон через FlightModel и присылает готовую ориентацию, поэтому
-        дрон больше не «проваливается» сквозь площадку и не теряет высоту при наклоне.
-      * FPV-камера сглаживается по CFrame дрона (lerp), чтобы репликация не выглядела
-        дёрганой.
-      * Сервер сам сообщает о потере дрона (DroneLost) — клиент корректно выходит из
-        режима пилота, а не остаётся в мёртвой камере.
+    Клиент по-прежнему НЕ трогает физику: он отправляет стики, сервер считает полёт.
+    Что добавилось:
+      * личные настройки полёта (скорость, чувствительность, инверсия) — ползунки в
+        меню, сервер их проверяет и сохраняет;
+      * гонка: кольца по порядку, таймер круга, подсветка следующего кольца;
+      * кнопка «Взять дрон» — запрос к серверу, а не клик по невидимому хитбоксу;
+      * весь интерфейс вынесен в модуль DroneUI.
 ]]
 
 local Players           = game:GetService("Players")
 local RunService        = game:GetService("RunService")
 local UserInputService  = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local TweenService      = game:GetService("TweenService")
 
 local Config  = require(ReplicatedStorage:WaitForChild("DroneConfig"))
+local Tuning  = require(ReplicatedStorage:WaitForChild("Tuning"))
+local DroneUI = require(script.Parent:WaitForChild("DroneUI"))
+
 local remotes = ReplicatedStorage:WaitForChild("DroneRemotes")
 
 local mountRemote        = remotes:WaitForChild("MountDrone")
@@ -26,6 +26,13 @@ local lostRemote         = remotes:WaitForChild("DroneLost")
 local inputRemote        = remotes:WaitForChild("DroneInput")
 local unmountRemote      = remotes:WaitForChild("UnmountDrone")
 local selfDestructRemote = remotes:WaitForChild("SelfDestruct")
+local requestRemote      = remotes:WaitForChild("RequestDrone")
+local tuningRemote       = remotes:WaitForChild("TuningChanged")
+local tuningSync         = remotes:WaitForChild("TuningSync")
+local tuningRequest      = remotes:WaitForChild("RequestTuning")
+local notifyRemote       = remotes:WaitForChild("Notify")
+local raceRemote         = remotes:WaitForChild("RaceEvent")
+local getTopRecords      = remotes:WaitForChild("GetTopRecords")
 
 local player = Players.LocalPlayer
 local camera = workspace.CurrentCamera
@@ -37,23 +44,35 @@ local droneBody  = nil
 local motorSound = nil
 local windSound  = nil
 
-local pitchIn    = 0     -- +1 = вперёд
-local rollIn     = 0     -- +1 = вправо
-local yawIn      = 0     -- +1 = вправо
-local throttleIn = 0.5   -- 0.5 = удержание высоты
+local rawPitch   = 0     -- +1 = вперёд
+local rawRoll    = 0     -- +1 = вправо
+local rawYaw     = 0     -- +1 = вправо
+local throttleIn = 0.5   -- 0.5 = стик в центре (дрон проседает), 1 = вверх
 
 local keysDown   = {}
 local isMobile   = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
 local inputAccum = 0
+local tuningSendToken = 0
 
 local smoothCF   = nil
 local lastPos    = nil
 local smoothSpeed = 0
 
--- forward declarations (используются в кнопках HUD)
+-- гонка
+local raceIndex  = 1
+local lapStart   = 0
+local bestLap    = 0
+local ringTintIndex = -1
+
+local leftTouchId, rightTouchId
+local leftJoyCenter, rightJoyCenter
+local JOY_RADIUS = 55
+
+-- forward declarations
 local unmountDrone
 local manualDetonate
 local localUnmount
+local forceExit
 
 -- ────────────────────── ЗВУК ВЕТРА ─────────────────────────
 windSound = Instance.new("Sound")
@@ -63,317 +82,84 @@ windSound.Looped = true
 windSound.Volume = 0
 windSound.Parent = camera
 
--- ────────────────────── HUD И OSD ──────────────────────────
-local hudGui, horizonBar, warningLabel, flashFrame, statusLabel
+-- ────────────────────── ИНТЕРФЕЙС ──────────────────────────
+local ui = DroneUI.new({
+    player = player,
+    isMobile = isMobile,
 
-local function createHUD()
-    if hudGui then hudGui:Destroy() end
+    onTake = function()
+        requestRemote:FireServer()
+    end,
 
-    hudGui = Instance.new("ScreenGui")
-    hudGui.Name = "DroneHUD"
-    hudGui.ResetOnSpawn = false
-    hudGui.Enabled = false
-    hudGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-    hudGui.Parent = player:WaitForChild("PlayerGui")
-
-    -- Вспышка (детонация / попадание)
-    flashFrame = Instance.new("Frame")
-    flashFrame.Name = "Flash"
-    flashFrame.Size = UDim2.new(1, 0, 1, 0)
-    flashFrame.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-    flashFrame.BackgroundTransparency = 1
-    flashFrame.BorderSizePixel = 0
-    flashFrame.ZIndex = 5
-    flashFrame.Parent = hudGui
-
-    -- Виньетка
-    local vig = Instance.new("ImageLabel")
-    vig.Size = UDim2.new(1, 0, 1, 0)
-    vig.BackgroundTransparency = 1
-    vig.Image = "rbxassetid://4576475446"
-    vig.ImageColor3 = Color3.fromRGB(0, 0, 0)
-    vig.ImageTransparency = 0.55
-    vig.Parent = hudGui
-
-    -- Прицел
-    local chV = Instance.new("Frame")
-    chV.Size = UDim2.new(0, 2, 0, 24)
-    chV.AnchorPoint = Vector2.new(0.5, 0.5)
-    chV.Position = UDim2.new(0.5, 0, 0.5, 0)
-    chV.BackgroundColor3 = Color3.fromRGB(0, 255, 120)
-    chV.BackgroundTransparency = 0.2
-    chV.BorderSizePixel = 0
-    chV.Parent = hudGui
-
-    local chH = Instance.new("Frame")
-    chH.Size = UDim2.new(0, 24, 0, 2)
-    chH.AnchorPoint = Vector2.new(0.5, 0.5)
-    chH.Position = UDim2.new(0.5, 0, 0.5, 0)
-    chH.BackgroundColor3 = Color3.fromRGB(0, 255, 120)
-    chH.BackgroundTransparency = 0.2
-    chH.BorderSizePixel = 0
-    chH.Parent = hudGui
-
-    -- Авиагоризонт
-    horizonBar = Instance.new("Frame")
-    horizonBar.Name = "Horizon"
-    horizonBar.Size = UDim2.new(0, 100, 0, 2)
-    horizonBar.AnchorPoint = Vector2.new(0.5, 0.5)
-    horizonBar.Position = UDim2.new(0.5, 0, 0.5, 20)
-    horizonBar.BackgroundColor3 = Color3.fromRGB(0, 255, 120)
-    horizonBar.BackgroundTransparency = 0.4
-    horizonBar.BorderSizePixel = 0
-    horizonBar.Parent = hudGui
-
-    -- Панель телеметрии
-    local panel = Instance.new("Frame")
-    panel.Name = "InfoPanel"
-    panel.Size = UDim2.new(0, 155, 0, 105)
-    panel.Position = UDim2.new(0, 14, 0, 14)
-    panel.BackgroundColor3 = Color3.fromRGB(10, 15, 10)
-    panel.BackgroundTransparency = 0.45
-    panel.BorderSizePixel = 0
-    panel.Parent = hudGui
-    Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 8)
-
-    local function makeLabel(name, yPos)
-        local l = Instance.new("TextLabel")
-        l.Name = name
-        l.Size = UDim2.new(1, -16, 0, 20)
-        l.Position = UDim2.new(0, 10, 0, yPos)
-        l.BackgroundTransparency = 1
-        l.TextColor3 = Color3.fromRGB(0, 255, 120)
-        l.Font = Enum.Font.Code
-        l.TextSize = 14
-        l.TextXAlignment = Enum.TextXAlignment.Left
-        l.Text = ""
-        l.Parent = panel
-        return l
-    end
-    makeLabel("Speed", 8)
-    makeLabel("Alt", 30)
-    makeLabel("Thr", 52)
-    makeLabel("Mode", 74)
-
-    local topR = Instance.new("TextLabel")
-    topR.Size = UDim2.new(0, 140, 0, 26)
-    topR.Position = UDim2.new(1, -150, 0, 14)
-    topR.BackgroundTransparency = 1
-    topR.TextColor3 = Color3.fromRGB(255, 60, 60)
-    topR.Font = Enum.Font.Code
-    topR.TextSize = 15
-    topR.Text = "● REC  FPV"
-    topR.Parent = hudGui
-
-    -- Баннер предупреждения / статуса
-    warningLabel = Instance.new("TextLabel")
-    warningLabel.Name = "WarningBanner"
-    warningLabel.Size = UDim2.new(0, 380, 0, 38)
-    warningLabel.AnchorPoint = Vector2.new(0.5, 0.5)
-    warningLabel.Position = UDim2.new(0.5, 0, 0.22, 0)
-    warningLabel.BackgroundColor3 = Color3.fromRGB(210, 20, 20)
-    warningLabel.BackgroundTransparency = 0.25
-    warningLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-    warningLabel.Font = Enum.Font.GothamBold
-    warningLabel.TextSize = 15
-    warningLabel.Text = "⚠️ СИГНАЛ ТЕРЯЕТСЯ — ВЫХОД ЗА КАРТУ"
-    warningLabel.Visible = false
-    warningLabel.Parent = hudGui
-    Instance.new("UICorner", warningLabel).CornerRadius = UDim.new(0, 8)
-
-    local statusLabel = Instance.new("TextLabel")
-    statusLabel.Name = "StatusBanner"
-    statusLabel.Size = UDim2.new(0, 380, 0, 54)
-    statusLabel.AnchorPoint = Vector2.new(0.5, 0.5)
-    statusLabel.Position = UDim2.new(0.5, 0, 0.42, 0)
-    statusLabel.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
-    statusLabel.BackgroundTransparency = 0.35
-    statusLabel.TextColor3 = Color3.fromRGB(255, 120, 120)
-    statusLabel.Font = Enum.Font.GothamBlack
-    statusLabel.TextSize = 20
-    statusLabel.Text = ""
-    statusLabel.Visible = false
-    statusLabel.Parent = hudGui
-    Instance.new("UICorner", statusLabel).CornerRadius = UDim.new(0, 8)
-
-    -- Кнопки
-    local topControls = Instance.new("Frame")
-    topControls.Name = "TopControls"
-    topControls.Size = UDim2.new(0, 270, 0, 42)
-    topControls.AnchorPoint = Vector2.new(0.5, 0)
-    topControls.Position = UDim2.new(0.5, 0, 0, 12)
-    topControls.BackgroundTransparency = 1
-    topControls.Parent = hudGui
-
-    local boomBtn = Instance.new("TextButton")
-    boomBtn.Size = UDim2.new(0, 135, 0, 38)
-    boomBtn.Position = UDim2.new(0, 0, 0, 0)
-    boomBtn.BackgroundColor3 = Color3.fromRGB(225, 30, 30)
-    boomBtn.BackgroundTransparency = 0.15
-    boomBtn.BorderSizePixel = 0
-    boomBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    boomBtn.Font = Enum.Font.GothamBlack
-    boomBtn.TextSize = 14
-    boomBtn.Text = "💥 ПОДРЫВ"
-    boomBtn.Parent = topControls
-    Instance.new("UICorner", boomBtn).CornerRadius = UDim.new(0, 8)
-    boomBtn.MouseButton1Click:Connect(function()
+    onDetonate = function()
         if mounted then manualDetonate() end
-    end)
+    end,
 
-    local exitBtn = Instance.new("TextButton")
-    exitBtn.Size = UDim2.new(0, 115, 0, 38)
-    exitBtn.Position = UDim2.new(0, 145, 0, 0)
-    exitBtn.BackgroundColor3 = Color3.fromRGB(55, 60, 70)
-    exitBtn.BackgroundTransparency = 0.25
-    exitBtn.BorderSizePixel = 0
-    exitBtn.TextColor3 = Color3.fromRGB(235, 235, 235)
-    exitBtn.Font = Enum.Font.GothamBold
-    exitBtn.TextSize = 13
-    exitBtn.Text = "🚪 ВЫХОД"
-    exitBtn.Parent = topControls
-    Instance.new("UICorner", exitBtn).CornerRadius = UDim.new(0, 8)
-    exitBtn.MouseButton1Click:Connect(function()
+    onExit = function()
         if mounted then unmountDrone() end
-    end)
+    end,
 
-    if not isMobile then
-        local hint = Instance.new("TextLabel")
-        hint.Size = UDim2.new(0, 560, 0, 34)
-        hint.AnchorPoint = Vector2.new(0.5, 1)
-        hint.Position = UDim2.new(0.5, 0, 1, -12)
-        hint.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-        hint.BackgroundTransparency = 0.55
-        hint.TextColor3 = Color3.fromRGB(220, 220, 220)
-        hint.Font = Enum.Font.Code
-        hint.TextSize = 13
-        hint.Text = "W/S: вперёд-назад | A/D: крен | Q/E: курс | Space/Shift: газ | R: подрыв | F: выход"
-        hint.Parent = hudGui
-        Instance.new("UICorner", hint).CornerRadius = UDim.new(0, 6)
-    end
-end
+    onTuningChanged = function(t)
+        -- Отправляем на сервер с небольшой задержкой: при перетаскивании ползунка
+        -- не нужно по 30 пакетов в секунду.
+        tuningSendToken = tuningSendToken + 1
+        local token = tuningSendToken
+        task.delay(0.15, function()
+            if token ~= tuningSendToken then return end
+            tuningRemote:FireServer(t)
+        end)
+    end,
 
-local function updateHUD()
-    if not hudGui or not hudGui.Enabled or not droneBody then return end
-    local panel = hudGui:FindFirstChild("InfoPanel")
-    if not panel then return end
+    onRequestRecords = function()
+        task.spawn(function()
+            local ok, list = pcall(function()
+                return getTopRecords:InvokeServer()
+            end)
+            if ok then
+                ui:setRecords(list)
+            else
+                ui:setRecords({})
+                ui:toast("Не удалось загрузить таблицу рекордов", "bad")
+            end
+        end)
+    end,
+})
 
-    local sLbl = panel:FindFirstChild("Speed")
-    if sLbl then sLbl.Text = string.format("SPD  %d st/s", math.floor(smoothSpeed + 0.5)) end
+ui:setPersonalBest(0)
 
-    local aLbl = panel:FindFirstChild("Alt")
-    if aLbl then aLbl.Text = string.format("ALT  %d st", math.floor(droneBody.Position.Y + 0.5)) end
+-- Сообщения сервера, отправленные до подписки, теряются, поэтому просим
+-- настройки явно — иначе у игрока будут дефолтные ползунки вместо сохранённых.
+task.defer(function()
+    tuningRequest:FireServer()
+end)
 
-    local tLbl = panel:FindFirstChild("Thr")
-    if tLbl then tLbl.Text = string.format("THR  %d %%", math.floor(throttleIn * 100 + 0.5)) end
-
-    local mLbl = panel:FindFirstChild("Mode")
-    if mLbl then mLbl.Text = "MODE [HOLD]" end
-
-    if horizonBar then
-        local _, _, roll = droneBody.CFrame:ToOrientation()
-        local pitch = math.asin(math.clamp(droneBody.CFrame.LookVector.Y, -1, 1))
-        horizonBar.Rotation = math.deg(roll)
-        horizonBar.Position = UDim2.new(0.5, 0, 0.5, -math.clamp(math.deg(pitch) * 1.2, -60, 60))
-    end
-end
-
--- ────────────────────── СТИКИ (МОБИЛА) ─────────────────────
-local mobileGui
-local leftJoyCenter, rightJoyCenter
-local leftTouchId, rightTouchId
-local leftThumb, rightThumb
-local JOY_RADIUS = 55
-
-local function createMobileUI()
-    if not isMobile then return end
-    if mobileGui then mobileGui:Destroy() end
-
-    mobileGui = Instance.new("ScreenGui")
-    mobileGui.Name = "MobileControls"
-    mobileGui.ResetOnSpawn = false
-    mobileGui.Enabled = false
-    mobileGui.Parent = player:WaitForChild("PlayerGui")
-
-    local function createStick(name, xAnchor, xPos, labelTxt)
-        local base = Instance.new("Frame")
-        base.Name = name .. "Base"
-        base.Size = UDim2.new(0, 140, 0, 140)
-        base.AnchorPoint = Vector2.new(xAnchor, 1)
-        base.Position = UDim2.new(xPos, 0, 1, -25)
-        base.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-        base.BackgroundTransparency = 0.82
-        base.BorderSizePixel = 0
-        base.Parent = mobileGui
-        Instance.new("UICorner", base).CornerRadius = UDim.new(1, 0)
-
-        local thumb = Instance.new("Frame")
-        thumb.Name = "Thumb"
-        thumb.Size = UDim2.new(0, 55, 0, 55)
-        thumb.AnchorPoint = Vector2.new(0.5, 0.5)
-        thumb.Position = UDim2.new(0.5, 0, 0.5, 0)
-        thumb.BackgroundColor3 = Color3.fromRGB(0, 220, 255)
-        thumb.BackgroundTransparency = 0.3
-        thumb.BorderSizePixel = 0
-        thumb.Parent = base
-        Instance.new("UICorner", thumb).CornerRadius = UDim.new(1, 0)
-
-        local lbl = Instance.new("TextLabel")
-        lbl.Size = UDim2.new(1, 0, 0, 18)
-        lbl.Position = UDim2.new(0, 0, 0, -22)
-        lbl.BackgroundTransparency = 1
-        lbl.TextColor3 = Color3.fromRGB(220, 220, 220)
-        lbl.Font = Enum.Font.GothamBold
-        lbl.TextSize = 12
-        lbl.Text = labelTxt
-        lbl.Parent = base
-
-        return base, thumb
-    end
-
-    local _, lThumb  = createStick("LeftStick",  0, 0.04, "↑ ГАЗ / ← КУРС →")
-    local _, rThumb  = createStick("RightStick", 1, 0.96, "↑ ВПЕРЁД / ← КРЕН →")
-    leftThumb  = lThumb
-    rightThumb = rThumb
-end
-
+-- ────────────────────── ВВОД ───────────────────────────────
 local function resetInputs()
     leftTouchId = nil
     rightTouchId = nil
     leftJoyCenter = nil
     rightJoyCenter = nil
-    pitchIn = 0
-    rollIn = 0
-    yawIn = 0
+    rawPitch = 0
+    rawRoll = 0
+    rawYaw = 0
     throttleIn = 0.5
     keysDown = {}
-    if leftThumb then leftThumb.Position = UDim2.new(0.5, 0, 0.5, 0) end
-    if rightThumb then rightThumb.Position = UDim2.new(0.5, 0, 0.5, 0) end
-end
-
--- ────────────────────── ВВОД ──────────────────────────────
--- Кривая отклика стика: у центра точнее (удобно целиться), у края — полная амплитуда.
--- Раньше стоял квадрат (x*|x|), из-за него половина отклонения давала всего 25%
--- отклика — отсюда ощущение «ватного» управления.
-local STICK_EXPO = 1.3
-local function stick(v)
-    if v == 0 then return 0 end
-    local sign = (v > 0) and 1 or -1
-    return sign * math.abs(v) ^ STICK_EXPO
+    ui:setStick("left", nil)
+    ui:setStick("right", nil)
 end
 
 if isMobile then
     UserInputService.InputBegan:Connect(function(input, gp)
-        if gp or not mounted then return end
+        if gp or not mounted or ui:isMenuOpen() then return end
         if input.UserInputType ~= Enum.UserInputType.Touch then return end
 
         local pos = Vector2.new(input.Position.X, input.Position.Y)
         local screenW = camera.ViewportSize.X
 
-        if pos.X < (screenW * 0.45) and not leftTouchId then
+        if pos.X < (screenW * 0.5) and not leftTouchId then
             leftTouchId = input
             leftJoyCenter = pos
-        elseif pos.X >= (screenW * 0.55) and not rightTouchId then
+        elseif not rightTouchId then
             rightTouchId = input
             rightJoyCenter = pos
         end
@@ -381,37 +167,25 @@ if isMobile then
 
     UserInputService.InputChanged:Connect(function(input)
         if input.UserInputType ~= Enum.UserInputType.Touch then return end
-        local dz = 0.04
+        local dz = 0.02
 
         if input == leftTouchId and leftJoyCenter then
             local delta = Vector2.new(input.Position.X, input.Position.Y) - leftJoyCenter
             local norm = delta / JOY_RADIUS
             if norm.Magnitude > 1 then norm = norm.Unit end
 
-            local rawX = (math.abs(norm.X) > dz) and norm.X or 0
-            local rawY = (math.abs(norm.Y) > dz) and norm.Y or 0
-
-            yawIn = stick(rawX)
-            throttleIn = math.clamp(0.5 - (rawY * 0.5), 0, 1)
-
-            if leftThumb then
-                leftThumb.Position = UDim2.new(0.5 + norm.X * 0.4, 0, 0.5 + norm.Y * 0.4, 0)
-            end
+            rawYaw = (math.abs(norm.X) > dz) and norm.X or 0
+            throttleIn = math.clamp(0.5 - (norm.Y * 0.5), 0, 1)
+            ui:setStick("left", norm)
 
         elseif input == rightTouchId and rightJoyCenter then
             local delta = Vector2.new(input.Position.X, input.Position.Y) - rightJoyCenter
             local norm = delta / JOY_RADIUS
             if norm.Magnitude > 1 then norm = norm.Unit end
 
-            local rawX = (math.abs(norm.X) > dz) and norm.X or 0
-            local rawY = (math.abs(norm.Y) > dz) and norm.Y or 0
-
-            rollIn  = stick(rawX)
-            pitchIn = stick(-rawY)             -- палец вверх = полёт вперёд
-
-            if rightThumb then
-                rightThumb.Position = UDim2.new(0.5 + norm.X * 0.4, 0, 0.5 + norm.Y * 0.4, 0)
-            end
+            rawRoll  = (math.abs(norm.X) > dz) and norm.X or 0
+            rawPitch = (math.abs(norm.Y) > dz) and -norm.Y or 0      -- палец вверх = вперёд
+            ui:setStick("right", norm)
         end
     end)
 
@@ -419,16 +193,16 @@ if isMobile then
         if input == leftTouchId then
             leftTouchId = nil
             leftJoyCenter = nil
-            yawIn = 0
+            rawYaw = 0
             throttleIn = 0.5
-            if leftThumb then leftThumb.Position = UDim2.new(0.5, 0, 0.5, 0) end
+            ui:setStick("left", nil)
         end
         if input == rightTouchId then
             rightTouchId = nil
             rightJoyCenter = nil
-            rollIn = 0
-            pitchIn = 0
-            if rightThumb then rightThumb.Position = UDim2.new(0.5, 0, 0.5, 0) end
+            rawRoll = 0
+            rawPitch = 0
+            ui:setStick("right", nil)
         end
     end)
 end
@@ -452,27 +226,27 @@ UserInputService.InputEnded:Connect(function(input)
 end)
 
 local function readKeyboard()
-    pitchIn = 0
-    rollIn  = 0
-    yawIn   = 0
+    rawPitch = 0
+    rawRoll  = 0
+    rawYaw   = 0
 
-    if keysDown[Enum.KeyCode.W] then pitchIn =  1 end
-    if keysDown[Enum.KeyCode.S] then pitchIn = -1 end
-    if keysDown[Enum.KeyCode.D] then rollIn  =  1 end
-    if keysDown[Enum.KeyCode.A] then rollIn  = -1 end
-    if keysDown[Enum.KeyCode.E] then yawIn   =  1 end
-    if keysDown[Enum.KeyCode.Q] then yawIn   = -1 end
+    if keysDown[Enum.KeyCode.W] then rawPitch =  1 end
+    if keysDown[Enum.KeyCode.S] then rawPitch = -1 end
+    if keysDown[Enum.KeyCode.D] then rawRoll  =  1 end
+    if keysDown[Enum.KeyCode.A] then rawRoll  = -1 end
+    if keysDown[Enum.KeyCode.E] then rawYaw   =  1 end
+    if keysDown[Enum.KeyCode.Q] then rawYaw   = -1 end
 
     if keysDown[Enum.KeyCode.Space] then
         throttleIn = math.min(throttleIn + 0.03, 1)
-    elseif keysDown[Enum.KeyCode.LeftShift] then
+    elseif keysDown[Enum.KeyCode.LeftShift] or keysDown[Enum.KeyCode.RightShift] then
         throttleIn = math.max(throttleIn - 0.03, 0)
     else
-        -- плавный возврат к удержанию высоты
+        -- стик отпущен: возвращается в центр, дрон плавно проседает
         if throttleIn > 0.52 then
-            throttleIn = throttleIn - 0.015
+            throttleIn = math.max(0.5, throttleIn - 0.015)
         elseif throttleIn < 0.48 then
-            throttleIn = throttleIn + 0.015
+            throttleIn = math.min(0.5, throttleIn + 0.015)
         else
             throttleIn = 0.5
         end
@@ -493,8 +267,6 @@ local function setCharVisible(vis)
     end
 end
 
--- Свой дрон в FPV-режиме не должен быть виден: иначе при крене/тангаже в кадр
--- лезут рама, лучи и пропеллеры. Прячем только локально (у других он виден).
 local function setOwnModelVisible(vis)
     if not droneModel then return end
     pcall(function()
@@ -515,32 +287,32 @@ local function setPropWash(enabled)
     end
 end
 
-local function flash(color, transparency)
-    if not flashFrame then return end
-    flashFrame.BackgroundColor3 = color or Color3.fromRGB(255, 255, 255)
-    flashFrame.BackgroundTransparency = transparency or 0.1
-    TweenService:Create(flashFrame, TweenInfo.new(0.6), { BackgroundTransparency = 1 }):Play()
+local function freezeCharacter(frozen)
+    local char = player.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not hum then return end
+    if frozen then
+        hum.WalkSpeed = 0
+        pcall(function() hum.JumpHeight = 0 end)
+        pcall(function() hum.JumpPower = 0 end)
+    else
+        hum.WalkSpeed = 16
+        pcall(function() hum.JumpPower = 50 end)
+        pcall(function() hum.JumpHeight = 7.2 end)
+    end
 end
 
 local function showStatus(text)
-    if not hudGui then return end
-    local lbl = hudGui:FindFirstChild("StatusBanner")
-    if not lbl then return end
-    lbl.Text = text
-    lbl.Visible = true
-    task.delay(2.5, function()
-        if lbl then lbl.Visible = false end
-    end)
+    ui:toast(text)
 end
 
--- Аварийный выход: работает даже если клиент потерял своё состояние,
+-- Аварийный выход: работает, даже если клиент потерял своё состояние,
 -- иначе игрок остаётся в мёртвой FPV-камере и не может взять новый дрон
-local function forceExit(text)
+forceExit = function(text)
     localUnmount(false, nil)
     camera.CameraType = Enum.CameraType.Custom
-    if hudGui    then hudGui.Enabled    = false end
-    if mobileGui then mobileGui.Enabled = false end
     setCharVisible(true)
+    freezeCharacter(false)
     if text then showStatus(text) end
 end
 
@@ -554,18 +326,14 @@ localUnmount = function(notifyServer, lostReason)
     setOwnModelVisible(true)
 
     if motorSound then motorSound:Stop() end
-    if windSound  then windSound:Stop()  end
+    if windSound  then windSound.Volume = 0 end
     setPropWash(false)
 
     camera.CameraType = Enum.CameraType.Custom
-    if hudGui    then hudGui.Enabled    = false end
-    if mobileGui then mobileGui.Enabled = false end
+    ui:setMounted(false)
+    ui:setWarning(false)
     setCharVisible(true)
-    if warningLabel then warningLabel.Visible = false end
-
-    local char = player.Character
-    local hum = char and char:FindFirstChildOfClass("Humanoid")
-    if hum and hum.WalkSpeed == 0 then hum.WalkSpeed = 16 end
+    freezeCharacter(false)
 
     droneModel = nil
     droneBody  = nil
@@ -573,6 +341,9 @@ localUnmount = function(notifyServer, lostReason)
     smoothCF   = nil
     lastPos    = nil
     smoothSpeed = 0
+    raceIndex = 1
+    ringTintIndex = -1
+    tintRings(0)
 
     if notifyServer then
         unmountRemote:FireServer()
@@ -590,10 +361,41 @@ end
 
 manualDetonate = function()
     if not mounted then return end
-    -- без локальной вспышки: единственный эффект пришлёт сервер (DroneLost),
-    -- иначе взрыв визуально двоится
+    -- без локальной вспышки: единственный эффект пришлёт сервер (DroneLost)
     localUnmount(false, nil)
     selfDestructRemote:FireServer()
+end
+
+-- ────────────────────── КОЛЬЦА ─────────────────────────────
+-- Подсветка следующего кольца делается локально (клиентский цвет не
+-- реплицируется), поэтому у каждого игрока своя картина гонки.
+function tintRings(nextIndex)
+    if ringTintIndex == nextIndex then return end
+    ringTintIndex = nextIndex
+
+    local map = workspace:FindFirstChild("Map")
+    local obs = map and map:FindFirstChild("Obstacles")
+    local folder = obs and obs:FindFirstChild("RaceRings")
+    if not folder then return end
+
+    for _, ring in ipairs(folder:GetChildren()) do
+        local index = ring:GetAttribute("RingIndex") or 0
+        local isNext = (index == nextIndex)
+        local color = isNext and Color3.fromRGB(120, 232, 150) or Color3.fromRGB(96, 104, 118)
+
+        for _, part in ipairs(ring:GetChildren()) do
+            if part:IsA("BasePart") and part.Name == "Seg" then
+                part.Color = color
+            end
+        end
+
+        local sign = ring:FindFirstChild("Sign")
+        local bill = sign and sign:FindFirstChildOfClass("BillboardGui")
+        local label = bill and bill:FindFirstChildOfClass("TextLabel")
+        if label then
+            label.TextColor3 = isNext and Color3.fromRGB(190, 255, 205) or Color3.fromRGB(170, 176, 188)
+        end
+    end
 end
 
 -- ────────────────────── МАУНТ ──────────────────────────────
@@ -625,16 +427,10 @@ local function mountDrone(drone)
 
     setPropWash(true)
     setCharVisible(false)
-    setOwnModelVisible(false)   -- свой корпус в кадре не нужен
+    setOwnModelVisible(false)
+    freezeCharacter(true)
 
-    -- персонаж не должен ходить, пока мы летаем
-    local char = player.Character
-    local hum = char and char:FindFirstChildOfClass("Humanoid")
-    if hum then hum.WalkSpeed = 0 end
-
-    if hudGui    then hudGui.Enabled    = true end
-    if mobileGui then mobileGui.Enabled = true end
-    if warningLabel then warningLabel.Visible = false end
+    ui:setMounted(true)
 
     -- сразу отправляем нейтральный ввод, чтобы сервер не держал старое значение
     inputRemote:FireServer(0, 0, 0, 0.5)
@@ -644,11 +440,35 @@ end
 local CAM_TILT_RAD = math.rad(Config.CAM_TILT)
 
 RunService.RenderStepped:Connect(function(dt)
-    if not mounted then return end
+    if not mounted then
+        -- подсказка о ближайшем дроне, пока игрок на земле
+        if droneModel == nil then
+            local nearest, nearestDist = nil, math.huge
+            local drones = workspace:FindFirstChild("Drones")
+            local char = player.Character
+            local root = char and char:FindFirstChild("HumanoidRootPart")
+            if drones and root then
+                for _, d in ipairs(drones:GetChildren()) do
+                    local part = d.PrimaryPart
+                    if part and (d:GetAttribute("PilotUserId") or 0) == 0 then
+                        local dist = (part.Position - root.Position).Magnitude
+                        if dist < nearestDist then nearest, nearestDist = d, dist end
+                    end
+                end
+            end
+
+            if nearest then
+                ui:setTakeHint(string.format("Ближайший дрон в %d студах", math.floor(nearestDist)))
+            else
+                ui:setTakeHint("Свободного дрона рядом нет")
+            end
+        end
+        return
+    end
 
     -- Дрон исчез (взорван сервером / удалён) — выходим из режима пилота
     if not droneBody or not droneBody.Parent then
-        forceExit("ДРОН ПОТЕРЯН")
+        forceExit("Дрон потерян")
         return
     end
 
@@ -656,14 +476,21 @@ RunService.RenderStepped:Connect(function(dt)
         readKeyboard()
     end
 
-    -- 1. Отправляем стики на сервер ~30 раз в секунду
+    -- 1. Стики на сервер ~30 раз в секунду.
+    --    Пока открыто меню, ввод обнуляем, чтобы дрон не улетел под ползунками.
+    local raw = { pitch = rawPitch, roll = rawRoll, yaw = rawYaw, throttle = throttleIn }
+    if ui:isMenuOpen() then
+        raw = { pitch = 0, roll = 0, yaw = 0, throttle = 0.5 }
+    end
+    local input = Tuning.envelope(raw, ui:getTuning())
+
     inputAccum = inputAccum + dt
     if inputAccum >= (1 / 30) then
         inputAccum = 0
-        inputRemote:FireServer(pitchIn, rollIn, yawIn, throttleIn)
+        inputRemote:FireServer(input.pitch, input.roll, input.yaw, input.throttle)
     end
 
-    -- 2. Плавная камера: догоняем CFrame дрона, чтобы репликация не дёргалась
+    -- 2. Камера
     local targetCF = droneBody.CFrame
     smoothCF = smoothCF:Lerp(targetCF, math.clamp(dt * 22, 0, 1))
     camera.CFrame = smoothCF
@@ -680,20 +507,30 @@ RunService.RenderStepped:Connect(function(dt)
 
     -- 4. Звуки
     if motorSound then
-        motorSound.PlaybackSpeed = 0.85 + (throttleIn * 0.45) + math.clamp(smoothSpeed / Config.MAX_SPEED, 0, 1) * 0.25
+        motorSound.PlaybackSpeed = 0.85 + (throttleIn * 0.45)
+            + math.clamp(smoothSpeed / ui:getTuning().maxSpeed, 0, 1) * 0.25
         motorSound.Volume = 0.35 + (throttleIn * 0.3)
     end
-    windSound.Volume = math.clamp(smoothSpeed / Config.MAX_SPEED * 0.7, 0, 0.7)
+    windSound.Volume = math.clamp(smoothSpeed / ui:getTuning().maxSpeed * 0.7, 0, 0.7)
 
     -- 5. Предупреждение о границе
     local hDist = Vector2.new(pos.X, pos.Z).Magnitude
-    local isOut = hDist > (Config.BOUNDS_RADIUS - 40)
-        or pos.Y > (Config.BOUNDS_MAX_Y - 40)
-    if warningLabel then
-        warningLabel.Visible = isOut and math.floor(tick() * 2) % 2 == 0
-    end
+    local isOut = hDist > (Config.BOUNDS_RADIUS - 40) or pos.Y > (Config.BOUNDS_MAX_Y - 40)
+    ui:setWarning(isOut)
 
-    updateHUD()
+    -- 6. HUD
+    ui:updateTelemetry({ speed = smoothSpeed, alt = pos.Y, throttle = throttleIn })
+    ui:updateRace({
+        lapTime  = math.max(0, tick() - lapStart),
+        best     = bestLap,
+        nextRing = raceIndex,
+        total    = #Config.RACE_RINGS,
+    })
+    tintRings(raceIndex)
+
+    -- персонаж не должен ходить: сервер ставит WalkSpeed, но клиент тоже держит
+    local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+    if hum and hum.WalkSpeed > 0 then hum.WalkSpeed = 0 end
 end)
 
 -- ────────────────────── REMOTE LISTENERS ───────────────────
@@ -704,23 +541,77 @@ end)
 lostRemote.OnClientEvent:Connect(function(reason)
     local text
     if reason == "manual" then
-        text = "💥 ДРОН ПОДОРВАН"
+        text = "Дрон подорван"
     elseif reason == "borders" then
-        text = "📡 СИГНАЛ ПОТЕРЯН — ДРОН УЛЕТЕЛ ЗА КАРТУ"
+        text = "Дрон улетел за карту"
     elseif reason == "timeout" then
-        text = "📡 СВЯЗЬ С ДРОНОМ ПОТЕРЯНА"
+        text = "Связь с дроном потеряна"
     else
-        text = "💥 ДРОН РАЗБИЛСЯ"
+        text = "Дрон разбился"
     end
-    flash(Color3.fromRGB(255, 90, 60), 0.15)
-    forceExit(text)   -- всегда, даже если клиент уже потерял своё состояние
+    ui:flash(Color3.fromRGB(255, 90, 60), 0.15)
+    forceExit(text)
+end)
+
+notifyRemote.OnClientEvent:Connect(function(text)
+    ui:toast(tostring(text), "warn")
+end)
+
+tuningSync.OnClientEvent:Connect(function(t)
+    ui:setTuning(t)
+end)
+
+raceRemote.OnClientEvent:Connect(function(kind, a, b, c)
+    if kind == "start" then
+        raceIndex = 1
+        lapStart = tick()
+        tintRings(1)
+    elseif kind == "checkpoint" then
+        raceIndex = a or raceIndex
+        ui:toast(string.format("Кольцо %d из %d", raceIndex, b or #Config.RACE_RINGS))
+    elseif kind == "lap" then
+        local seconds = a or 0
+        local best = b or 0
+        bestLap = best
+        raceIndex = 1
+        lapStart = tick()
+        tintRings(1)
+        if c then
+            ui:toast(string.format("Круг пройден: %.2f — новый рекорд", seconds), "ok")
+        else
+            ui:toast(string.format("Круг пройден: %.2f", seconds), "ok")
+        end
+        ui:setPersonalBest(best)
+    elseif kind == "reset" then
+        raceIndex = 1
+        lapStart = tick()
+        tintRings(1)
+    end
 end)
 
 player.CharacterAdded:Connect(function()
     if mounted then
         localUnmount(true, nil)
     end
+    freezeCharacter(false)
 end)
 
-createHUD()
-createMobileUI()
+-- Личный рекорд подтягиваем из leaderstats (сервер пишет туда сразу после круга).
+task.spawn(function()
+    local stats = player:WaitForChild("leaderstats", 20)
+    if not stats then return end
+    local best = stats:WaitForChild("Лучший круг", 20)
+    if not best then return end
+
+    local function sync()
+        if best.Value and best.Value > 0 then
+            bestLap = best.Value
+            ui:setPersonalBest(best.Value)
+        end
+    end
+
+    sync()
+    best.Changed:Connect(sync)
+end)
+
+ui:setMounted(false)
