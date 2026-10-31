@@ -108,6 +108,25 @@ end
 local menuTrack = makeTrack("MenuMusic", Config.MUSIC_MENU, Config.MUSIC_VOLUME_MENU)
 local raceTrack = makeTrack("RaceMusic", Config.MUSIC_RACE, Config.MUSIC_VOLUME_RACE)
 
+local function startTrack(track)
+    local snd = track.snd
+
+    -- Громкость выставляем сразу, а твин — только для плавности. Если твин
+    -- почему-то не сработает, трек остался бы на нуле, то есть в полной тишине.
+    snd.Volume = track.volume
+    if not snd.IsPlaying then snd:Play() end
+
+    -- Ассет мог быть ещё не загружен в момент Play(): повторяем, но только
+    -- если этот трек всё ещё нужен.
+    if not snd.IsLoaded then
+        task.delay(2, function()
+            if currentMusic ~= track then return end
+            snd.Volume = track.volume
+            if not snd.IsPlaying then snd:Play() end
+        end)
+    end
+end
+
 local function switchMusic(track)
     if currentMusic == track then return end
     currentMusic = track
@@ -118,8 +137,7 @@ local function switchMusic(track)
         end
     end
 
-    if not track.snd.IsPlaying then track.snd:Play() end
-    TweenService:Create(track.snd, TweenInfo.new(0.9), { Volume = track.volume }):Play()
+    startTrack(track)
 end
 
 switchMusic(menuTrack)
