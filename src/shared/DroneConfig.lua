@@ -70,7 +70,7 @@ DroneConfig.SOUND_BEEP      = "rbxasset://sounds/electronicpingshort.wav"
 -- APM Music и DistroKid): они бесплатны и разрешены к использованию в любом
 -- опыте. Заливать чужой mp3 (альбом/радио) нельзя — модерация Roblox такой
 -- ассет отклоняет, а аккаунт получает страйк.
-DroneConfig.MUSIC_MENU          = "rbxassetid://138352099798766"  -- Neon Chase (Cyberpunk Racing)
+DroneConfig.MUSIC_MENU          = "rbxassetid://132778358012845"  -- Poobeshchay, собственный трек автора
 DroneConfig.MUSIC_RACE          = "rbxassetid://134324160901088"  -- Fast Drum & Bass Action Soundtrack
 DroneConfig.MUSIC_VOLUME_MENU   = 0.35
 DroneConfig.MUSIC_VOLUME_RACE   = 0.22
