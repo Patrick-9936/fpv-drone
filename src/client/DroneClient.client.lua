@@ -82,6 +82,48 @@ windSound.Looped = true
 windSound.Volume = 0
 windSound.Parent = camera
 
+-- ────────────────────── МУЗЫКА ─────────────────────────────
+-- В меню играет спокойный трек, в полёте — побыстрее и тише, чтобы не забивать
+-- мотор. Треки берём только из официальных библиотек Creator Store (APM Music,
+-- DistroKid): они бесплатны и разрешены к использованию в любом опыте.
+local SoundService = game:GetService("SoundService")
+local TweenService = game:GetService("TweenService")
+
+local musicTracks = {}
+local currentMusic = nil
+
+local function makeTrack(name, id, vol)
+    local snd = Instance.new("Sound")
+    snd.Name = name
+    snd.SoundId = id
+    snd.Looped = true
+    snd.Volume = 0
+    snd.Parent = SoundService
+
+    local track = { snd = snd, volume = vol }
+    musicTracks[name] = track
+    return track
+end
+
+local menuTrack = makeTrack("MenuMusic", Config.MUSIC_MENU, Config.MUSIC_VOLUME_MENU)
+local raceTrack = makeTrack("RaceMusic", Config.MUSIC_RACE, Config.MUSIC_VOLUME_RACE)
+
+local function switchMusic(track)
+    if currentMusic == track then return end
+    currentMusic = track
+
+    for _, t in pairs(musicTracks) do
+        if t ~= track then
+            TweenService:Create(t.snd, TweenInfo.new(0.7), { Volume = 0 }):Play()
+        end
+    end
+
+    if not track.snd.IsPlaying then track.snd:Play() end
+    TweenService:Create(track.snd, TweenInfo.new(0.9), { Volume = track.volume }):Play()
+end
+
+switchMusic(menuTrack)
+
 -- ────────────────────── ИНТЕРФЕЙС ──────────────────────────
 local ui = DroneUI.new({
     player = player,
@@ -327,6 +369,7 @@ localUnmount = function(notifyServer, lostReason)
 
     if motorSound then motorSound:Stop() end
     if windSound  then windSound.Volume = 0 end
+    switchMusic(menuTrack)
     setPropWash(false)
 
     camera.CameraType = Enum.CameraType.Custom
@@ -424,6 +467,7 @@ local function mountDrone(drone)
     end
     windSound.Volume = 0
     windSound:Play()
+    switchMusic(raceTrack)
 
     setPropWash(true)
     setCharVisible(false)

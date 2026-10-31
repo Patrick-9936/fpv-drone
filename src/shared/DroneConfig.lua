@@ -65,4 +65,14 @@ DroneConfig.SOUND_MOTOR     = "rbxassetid://686885384"
 DroneConfig.SOUND_EXPLOSION = "rbxassetid://3802269741"
 DroneConfig.SOUND_BEEP      = "rbxasset://sounds/electronicpingshort.wav"
 
+-- ── МУЗЫКА ──
+-- Только лицензированные треки из Creator Store (официальные библиотеки
+-- APM Music и DistroKid): они бесплатны и разрешены к использованию в любом
+-- опыте. Заливать чужой mp3 (альбом/радио) нельзя — модерация Roblox такой
+-- ассет отклоняет, а аккаунт получает страйк.
+DroneConfig.MUSIC_MENU          = "rbxassetid://138352099798766"  -- Neon Chase (Cyberpunk Racing)
+DroneConfig.MUSIC_RACE          = "rbxassetid://134324160901088"  -- Fast Drum & Bass Action Soundtrack
+DroneConfig.MUSIC_VOLUME_MENU   = 0.35
+DroneConfig.MUSIC_VOLUME_RACE   = 0.22
+
 return DroneConfig
